@@ -68,6 +68,20 @@ You will see a password page. Enter your `MCP_PASSWORD`. Once connected on web, 
 | `createWorkout` | Writes a structured workout, which syncs to Garmin |
 | `updateWorkout` | Edits an existing planned workout |
 | `deleteEvent` | Removes a planned workout |
+| `getActivityDetails` | Per-km splits, stops and walking time for one activity |
+| `getGarminRecovery` | Direct from Garmin Connect: training readiness, Body Battery, stress, sleep phases, HRV status |
+| `getGarminFitness` | Direct from Garmin Connect: VO2max, training status, race predictions |
+| `getCoachContext` | Coach agent: instructions, memory, conversation, data snapshot |
+| `sendMessage` | Coach agent: sends a Telegram message |
+| `updateMemory` | Coach agent: notes, open items, self-scheduled check-ins |
+
+Activity, wellness and event tools now return compact objects (pass `raw: true` to `getRecentActivities` for the full intervals.icu payload).
+
+## Running coach agent
+
+See [SETUP-TRENER.md](SETUP-TRENER.md) (Polish). The worker receives Telegram messages, watches for new runs every 15 minutes and wakes a Claude Code scheduled task through its API trigger. Coach rules live in [coach/TRENER.md](coach/TRENER.md).
+
+Garmin Connect direct access is optional and unofficial: log in once on the worker's `/setup` page (password is not stored, only the OAuth tokens, using the same flow as the open-source `garth` library). Garmin can change or block this at any time; intervals.icu remains the primary data source.
 
 ## First prompt to try
 

@@ -16,10 +16,21 @@
   ],
   "durable_objects": {
     "bindings": [
-      { "name": "MCP_OBJECT", "class_name": "MyMCP" }
+      { "name": "MCP_OBJECT", "class_name": "MyMCP" },
+      { "name": "COACH_STATE", "class_name": "CoachState" }
     ]
   },
   "migrations": [
-    { "tag": "v1", "new_sqlite_classes": ["MyMCP"] }
+    { "tag": "v1", "new_sqlite_classes": ["MyMCP"] },
+    { "tag": "v2", "new_sqlite_classes": ["CoachState"] }
+  ],
+  // Coach scheduler: every 15 minutes checks for new runs, daily check-ins and
+  // check-ins the coach scheduled for itself. Free on Cloudflare.
+  "triggers": {
+    "crons": ["*/15 * * * *"]
+  },
+  // Lets src/index.ts import coach/TRENER.md as text.
+  "rules": [
+    { "type": "Text", "globs": ["**/*.md"], "fallthrough": true }
   ]
 }
