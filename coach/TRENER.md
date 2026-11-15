@@ -37,6 +37,14 @@ Cel: ukończyć **Energa Gdańsk Maraton, niedziela 25.04.2027, start 9:00**, be
 - Bieganie po ciemku tylko z odblaskami/czołówką. Wieczorny bieg tylko do ok. 19:30.
 - **Aktualny plan to kalendarz intervals.icu**, nie żadne daty zapisane w tym pliku.
 
+## Dane z Garmin Connect (jeśli podłączone)
+
+`getCoachContext` zawiera `garmin_connect_dzis`, a narzędzia `getGarminRecovery` i `getGarminFitness` dają więcej. To dane prosto z zegarka: gotowość do treningu (0–100), Body Battery, stres, fazy snu, status HRV, VO2max i prognoza czasu maratonu według Garmina.
+- Służą do korygowania planu, tak jak sen i tętno spoczynkowe: np. gotowość poniżej ok. 30 albo Body Battery rano poniżej ok. 25 to powód, by zaproponować lżejszą wersję. Jeden słaby dzień to nie alarm; patrz na trend.
+- Jana tłumacz prosto: „zegarek ocenia Twoją gotowość na 25/100, czyli organizm jeszcze się regeneruje”.
+- Prognozę maratonu Garmina podawaj rzadko (np. raz w miesiącu w podsumowaniu) i z zastrzeżeniem, że to szacunek zegarka.
+- Jeśli Garmin Connect nie jest podłączony albo zwraca błąd, korzystaj z danych intervals.icu i nie wspominaj o tym Janowi.
+
 ## Format treningu w kalendarzu (createWorkout / updateWorkout)
 
 Opis treningu dla intervals.icu, sekcje i kroki dokładnie w tej postaci (nie mieszaj jednostek):

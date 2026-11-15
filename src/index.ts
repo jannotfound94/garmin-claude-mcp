@@ -4,6 +4,7 @@ import { z } from "zod";
 import OAuthProvider from "@cloudflare/workers-oauth-provider";
 import TRENER from "../coach/TRENER.md";
 import { Icu, compactActivity, compactEvent, compactIntervals, compactWellness, computeSplits } from "./icu";
+import { GarminClient, garminLogin, garminSubmitMfa } from "./garmin";
 import { runScheduler } from "./scheduler";
 import { coach, handleTelegramWebhook, sendTelegram, tg, webhookSecret } from "./telegram";
 import { addDays, daysBetween, fmtWarsaw, warsaw, warsawToUtc } from "./time";
@@ -11,6 +12,14 @@ import { addDays, daysBetween, fmtWarsaw, warsaw, warsawToUtc } from "./time";
 export { CoachState } from "./state";
 
 const MARATHON_DATE = "2027-04-25";
+
+async function garminClient(env: Env): Promise<GarminClient | null> {
+  const state = coach(env);
+  const tokens = await state.getGarmin();
+  return tokens ? new GarminClient(tokens, (t) => state.setGarmin(t)) : null;
+}
+
+const NO_GARMIN = "Garmin Connect nie jest podłączony (strona /setup serwera, sekcja Garmin Connect).";
 
 const text = (data: unknown) => ({
   content: [{ type: "text" as const, text: typeof data === "string" ? data : JSON.stringify(data) }],
@@ -137,6 +146,34 @@ export class MyMCP extends McpAgent<Env> {
       },
     );
 
+    // ---------------- Garmin Connect (direct) ----------------
+
+    this.server.tool(
+      "getGarminRecovery",
+      "Straight from Garmin Connect: training readiness, Body Battery, stress, sleep phases, HRV status, resting HR, per day. Data intervals.icu does not have.",
+      { days: z.number().optional().describe("How many days back including today, default 3, max 14") },
+      async ({ days = 3 }) => {
+        const g = await garminClient(this.env);
+        if (!g) return text(NO_GARMIN);
+        const n = Math.min(Math.max(days, 1), 14);
+        const dates = Array.from({ length: n }, (_, i) => addDays(today(), -i));
+        const out = [];
+        for (const d of dates) out.push(await g.daily(d));
+        return text(out);
+      },
+    );
+
+    this.server.tool(
+      "getGarminFitness",
+      "Straight from Garmin Connect: VO2max, fitness age, training status, and Garmin's race-time predictions (5k, 10k, half, marathon).",
+      {},
+      async () => {
+        const g = await garminClient(this.env);
+        if (!g) return text(NO_GARMIN);
+        return text(await g.fitness(today()));
+      },
+    );
+
     // ---------------- coach agent ----------------
 
     this.server.tool(
@@ -149,10 +186,12 @@ export class MyMCP extends McpAgent<Env> {
         this.contextAt = now.toISOString();
         const mem = await coach(this.env).getMemory();
         const icu = this.icu();
-        const [acts, events, well] = await Promise.allSettled([
+        const g = await garminClient(this.env);
+        const [acts, events, well, garminToday] = await Promise.allSettled([
           icu.activities(addDays(local.date, -14)),
           icu.events(addDays(local.date, -7), addDays(local.date, 14)),
           icu.wellness(addDays(local.date, -7)),
+          g ? g.daily(local.date) : Promise.resolve(NO_GARMIN),
         ]);
         const val = <T,>(r: PromiseSettledResult<T>, f: (x: T) => unknown) =>
           r.status === "fulfilled" ? f(r.value) : { error: String(r.reason) };
@@ -178,6 +217,7 @@ export class MyMCP extends McpAgent<Env> {
             biegi_14_dni: val(acts, (a: any[]) => a.map(compactActivity)),
             kalendarz_od_minus7_do_plus14: val(events, (e: any[]) => e.map(compactEvent)),
             samopoczucie_7_dni: val(well, (w: any[]) => w.map(compactWellness)),
+            garmin_connect_dzis: val(garminToday, (x) => x),
           },
           telegram_skonfigurowany: Boolean(this.env.TELEGRAM_BOT_TOKEN && this.env.TELEGRAM_CHAT_ID),
         });
@@ -279,6 +319,7 @@ async function setupPage(env: Env, password: string, notice: string) {
     <li>Pamięć: ${mem.notes.length} notatek, ${mem.openItems.length} otwartych spraw, ${mem.checkIns.length} zaplanowanych sprawdzeń, ${mem.conversation.length} wiadomości w historii</li>
   </ul>
   <p>Ostatnie pobudki trenera:</p><ul>${fires || "<li>brak</li>"}</ul>
+  ${await garminSection(env, password)}
   <form method="post">
     <input type="hidden" name="password" value="${esc(password)}">
     ${btn("connect", "1. Podłącz Telegram (webhook) i wyślij wiadomość testową")}<br>
@@ -287,6 +328,27 @@ async function setupPage(env: Env, password: string, notice: string) {
     ${btn("disconnect", "Odłącz webhook Telegrama (powrót do Composio)")}
   </form>`,
   );
+}
+
+async function garminSection(env: Env, password: string) {
+  const state = coach(env);
+  const tokens = await state.getGarmin();
+  const pending = await state.getGarminPending();
+  const hidden = `<input type="hidden" name="password" value="${esc(password)}">`;
+  const field = (name: string, type: string, ph: string) =>
+    `<input name="${name}" type="${type}" placeholder="${ph}" style="width:100%;padding:.5rem;margin-bottom:.5rem" autocomplete="off">`;
+  let body: string;
+  if (tokens) {
+    body = `<p>✅ Połączono ${esc(fmtWarsaw(tokens.connectedAt))}${tokens.displayName ? ` (${esc(tokens.displayName)})` : ""}.</p>
+    <form method="post">${hidden}${btn("garmin_test", "Sprawdź dane z Garmin Connect")} ${btn("garmin_disconnect", "Odłącz Garmin Connect")}</form>`;
+  } else if (pending) {
+    body = `<p>Garmin wysłał Ci kod weryfikacyjny (e-mail lub SMS). Wpisz go poniżej (ważny kilka minut).</p>
+    <form method="post">${hidden}${field("garmin_code", "text", "Kod z Garmina")}${btn("garmin_mfa", "Potwierdź kod")}</form>`;
+  } else {
+    body = `<p>Wpisz dane logowania do Garmin Connect. Hasło jest użyte jednorazowo do zalogowania i <b>nie jest nigdzie zapisywane</b>; serwer zachowuje tylko klucz dostępu (ważny ok. roku).</p>
+    <form method="post">${hidden}${field("garmin_email", "email", "E-mail Garmin")}${field("garmin_password", "password", "Hasło Garmin")}${btn("garmin_login", "Połącz z Garmin Connect")}</form>`;
+  }
+  return `<h3>Garmin Connect</h3>${body}`;
 }
 
 async function handleSetup(request: Request, env: Env, origin: string): Promise<Response> {
@@ -323,6 +385,37 @@ async function handleSetup(request: Request, env: Env, origin: string): Promise<
       case "wake":
         await coach(env).wakeNow("TEST_Z_PANELU (sprawdź kontekst; napisz do Jana tylko jeśli jest ku temu powód)");
         notice = "Trener zostanie obudzony w ciągu kilku sekund. Odśwież za chwilę, by zobaczyć wynik.";
+        break;
+      case "garmin_login": {
+        const r = await garminLogin(String(form.get("garmin_email") ?? ""), String(form.get("garmin_password") ?? ""));
+        if (r.status === "mfa") {
+          await coach(env).setGarminPending(r.pending);
+          notice = "Garmin prosi o kod weryfikacyjny. Wpisz go w sekcji Garmin Connect.";
+        } else {
+          await coach(env).setGarmin(r.tokens);
+          notice = "Połączono z Garmin Connect ✅";
+        }
+        break;
+      }
+      case "garmin_mfa": {
+        const pending = await coach(env).getGarminPending();
+        if (!pending) throw new Error("Kod wygasł. Zaloguj się ponownie.");
+        await coach(env).setGarmin(await garminSubmitMfa(pending, String(form.get("garmin_code") ?? "")));
+        await coach(env).setGarminPending(null);
+        notice = "Połączono z Garmin Connect ✅";
+        break;
+      }
+      case "garmin_test": {
+        const g = await garminClient(env);
+        if (!g) throw new Error(NO_GARMIN);
+        const d = await g.daily(warsaw().date);
+        notice = `Garmin Connect, dziś: ${JSON.stringify(d)}`;
+        break;
+      }
+      case "garmin_disconnect":
+        await coach(env).setGarmin(null);
+        await coach(env).setGarminPending(null);
+        notice = "Odłączono Garmin Connect.";
         break;
       case "disconnect":
         await tg(env, "deleteWebhook", { drop_pending_updates: false });
