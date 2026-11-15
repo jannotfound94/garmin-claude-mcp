@@ -68,6 +68,16 @@ You will see a password page. Enter your `MCP_PASSWORD`. Once connected on web, 
 | `createWorkout` | Writes a structured workout, which syncs to Garmin |
 | `updateWorkout` | Edits an existing planned workout |
 | `deleteEvent` | Removes a planned workout |
+| `getActivityDetails` | Per-km splits, stops and walking time for one activity |
+| `getCoachContext` | Coach agent: instructions, memory, conversation, data snapshot |
+| `sendMessage` | Coach agent: sends a Telegram message |
+| `updateMemory` | Coach agent: notes, open items, self-scheduled check-ins |
+
+Activity, wellness and event tools now return compact objects (pass `raw: true` to `getRecentActivities` for the full intervals.icu payload).
+
+## Running coach agent
+
+See [SETUP-TRENER.md](SETUP-TRENER.md) (Polish). The worker receives Telegram messages, watches for new runs every 15 minutes and wakes a Claude Code scheduled task through its API trigger. Coach rules live in [coach/TRENER.md](coach/TRENER.md).
 
 ## First prompt to try
 

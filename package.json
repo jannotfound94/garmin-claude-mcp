@@ -36,6 +36,18 @@
       },
       "MCP_PASSWORD": {
         "description": "Password you will type when connecting Claude. Generate with: openssl rand -hex 32"
+      },
+      "TELEGRAM_BOT_TOKEN": {
+        "description": "Optional, for the coach agent. Telegram bot token from @BotFather."
+      },
+      "TELEGRAM_CHAT_ID": {
+        "description": "Optional, for the coach agent. Your Telegram chat id."
+      },
+      "ROUTINE_FIRE_URL": {
+        "description": "Optional, for the coach agent. Fire URL of the Claude Code scheduled task's API trigger."
+      },
+      "ROUTINE_FIRE_TOKEN": {
+        "description": "Optional, for the coach agent. Token of that API trigger."
       }
     }
   }
