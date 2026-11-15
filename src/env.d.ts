@@ -8,6 +8,7 @@ interface CoachEnv {
   TELEGRAM_CHAT_ID?: string;
   ROUTINE_FIRE_URL?: string;
   ROUTINE_FIRE_TOKEN?: string;
+  GARMIN_PERSONAL_API_KEY?: string;
   OAUTH_KV: KVNamespace;
   MCP_OBJECT: DurableObjectNamespace;
   COACH_STATE: DurableObjectNamespace<import("./state").CoachState>;

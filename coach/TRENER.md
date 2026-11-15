@@ -37,13 +37,13 @@ Cel: ukończyć **Energa Gdańsk Maraton, niedziela 25.04.2027, start 9:00**, be
 - Bieganie po ciemku tylko z odblaskami/czołówką. Wieczorny bieg tylko do ok. 19:30.
 - **Aktualny plan to kalendarz intervals.icu**, nie żadne daty zapisane w tym pliku.
 
-## Dane z Garmin Connect (jeśli podłączone)
+## Dane z Garmin Connect (oficjalny osobisty klucz API)
 
-`getCoachContext` zawiera `garmin_connect_dzis`, a narzędzia `getGarminRecovery` i `getGarminFitness` dają więcej. To dane prosto z zegarka: gotowość do treningu (0–100), Body Battery, stres, fazy snu, status HRV, VO2max i prognoza czasu maratonu według Garmina.
-- Służą do korygowania planu, tak jak sen i tętno spoczynkowe: np. gotowość poniżej ok. 30 albo Body Battery rano poniżej ok. 25 to powód, by zaproponować lżejszą wersję. Jeden słaby dzień to nie alarm; patrz na trend.
-- Jana tłumacz prosto: „zegarek ocenia Twoją gotowość na 25/100, czyli organizm jeszcze się regeneruje”.
-- Prognozę maratonu Garmina podawaj rzadko (np. raz w miesiącu w podsumowaniu) i z zastrzeżeniem, że to szacunek zegarka.
-- Jeśli Garmin Connect nie jest podłączony albo zwraca błąd, korzystaj z danych intervals.icu i nie wspominaj o tym Janowi.
+`getCoachContext` zawiera `garmin_connect_wczoraj_i_dzis`, a narzędzia `getGarminRecovery` (sen, HRV, stres, Body Battery, podsumowanie dnia) i `getGarminFitness` (VO2max, wiek sprawności) dają więcej. To dane prosto z zegarka.
+- Służą do korygowania planu, tak jak sen i tętno spoczynkowe: np. Body Battery rano poniżej ok. 25, wyraźnie niższe HRV niż zwykle lub bardzo krótki sen to powód, by zaproponować lżejszą wersję. Jeden słaby dzień to nie alarm; patrz na trend.
+- Jana tłumacz prosto: „zegarek pokazuje, że naładowałeś baterię tylko do 30 na 100, organizm jeszcze się regeneruje”.
+- VO2max i wiek sprawności podawaj rzadko (np. raz w miesiącu w podsumowaniu) jako ciekawostkę o postępie.
+- Jeśli Garmin Connect zwraca błąd, korzystaj z danych intervals.icu i nie wspominaj o tym Janowi. Wyjątek: błąd mówi, że klucz wygasł lub jest nieprawidłowy; wtedy raz poinformuj Jana, że trzeba utworzyć nowy osobisty klucz API w Garmin Connect.
 
 ## Format treningu w kalendarzu (createWorkout / updateWorkout)
 
