@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { compactness, mapPage, proposeLoops, routeLengthM, tidyRoute } from "../src/routes";
-import { TextRouteError, detourPoints, distM, osmName, planTextRoute, sanitizeParsed } from "../src/textroute";
+import { TextRouteError, detourPoints, distM, osmName, pickCandidate, planTextRoute, sanitizeParsed, scoreName } from "../src/textroute";
 import vm from "node:vm";
 
 const LAT = 52.2;
@@ -103,7 +103,7 @@ const PLACES: Record<string, { lat: number; lon: number; label?: string; conf?: 
 };
 
 /** Podstawia wszystkie usługi zewnętrzne; zapisuje, o co pytano ORS (kolejność punktów w żądaniach trasy). */
-function stubWorld(parsed: unknown, opts: { missing?: string[] } = {}) {
+function stubWorld(parsed: unknown, opts: { missing?: string[]; photon?: unknown[] } = {}) {
   const real = globalThis.fetch;
   const routeCalls: number[][][] = [];
   globalThis.fetch = (async (url: any, init?: any) => {
@@ -117,13 +117,16 @@ function stubWorld(parsed: unknown, opts: { missing?: string[] } = {}) {
       const key = Object.keys(PLACES).find((k) => text.includes(k));
       if (!key || opts.missing?.some((m) => text.includes(m))) return new Response(JSON.stringify({ features: [] }));
       const pl = PLACES[key];
-      return new Response(JSON.stringify({ features: [{ geometry: { coordinates: [pl.lon, pl.lat] }, properties: { label: pl.label ?? key, confidence: pl.conf ?? 0.9 } }] }));
+      return new Response(JSON.stringify({ features: [{ geometry: { coordinates: [pl.lon, pl.lat] }, properties: { name: key, label: pl.label ?? key, confidence: pl.conf ?? 0.9 } }] }));
     }
+    if (u.includes("photon.komoot.io")) return new Response(JSON.stringify({ features: opts.photon ?? [] }));
     if (u.includes("overpass")) {
       const q = decodeURIComponent(String(init?.body));
-      const key = Object.keys(PLACES).find((k) => q.includes(`"name"~"${osmName(k)}"`));
-      if (!key || opts.missing?.some((m) => q.includes(m)) || PLACES[key].conf !== undefined) return new Response(JSON.stringify({ elements: [] }));
-      return new Response(JSON.stringify({ elements: [{ type: "node", lat: PLACES[key].lat, lon: PLACES[key].lon, tags: { name: key } }] }));
+      const stems = [...q.matchAll(/"name"~"([^"]+)"/g)].map((m) => m[1].toLowerCase());
+      const elements = Object.keys(PLACES)
+        .filter((k) => PLACES[k].conf === undefined && !opts.missing?.some((m) => k.includes(m)) && stems.some((s) => k.toLowerCase().includes(s)))
+        .map((k) => ({ type: "node", lat: PLACES[k].lat, lon: PLACES[k].lon, tags: { name: k } }));
+      return new Response(JSON.stringify({ elements }));
     }
     if (u.includes("/v2/directions/")) {
       const coords: number[][] = JSON.parse(init.body).coordinates;
@@ -193,8 +196,17 @@ test("trasa z opisu: luźny opis z dystansem jest wydłużany objazdem po wskaza
   }
 });
 
-test("trasa z opisu: nieznane miejsce, pytanie modelu i brak miejsc dają zrozumiałe błędy", async () => {
+test("trasa z opisu: nieznane miejsce jest pomijane z ostrzeżeniem, brak jakichkolwiek miejsc i niezrozumiały opis dają błędy", async () => {
   let w = stubWorld(parsedDetailed, { missing: ["Kaniowa"] });
+  try {
+    const r = await planTextRoute(env, HOME, "x".repeat(20));
+    assert.ok(!r.points.some((p) => p.name === "Kaniowa"), "nieznane miejsce nie trafia na trasę");
+    assert.equal(r.points.length, 5, "start + 3 miejsca + meta");
+    assert.ok(r.warnings.some((x) => /Nie znalazłem/.test(x) && /Kaniowa/.test(x)));
+  } finally {
+    w.restore();
+  }
+  w = stubWorld(parsedDetailed, { missing: ["Fort", "Plaża", "Kaniowa", "Park"] });
   try {
     await assert.rejects(planTextRoute(env, HOME, "x".repeat(20)), (e: any) => e instanceof TextRouteError && e.code === "not_found" && /Kaniowa/.test(e.message));
   } finally {
@@ -209,6 +221,41 @@ test("trasa z opisu: nieznane miejsce, pytanie modelu i brak miejsc dają zrozum
   w = stubWorld({ target_km: 8, stops: [], green: true, quiet: true, unsupported: ["bez wzniesień"] });
   try {
     await assert.rejects(planTextRoute(env, HOME, "osiem kilometrów bez górek"), (e: any) => e.code === "no_stops");
+  } finally {
+    w.restore();
+  }
+});
+
+test("dobór miejsca po nazwie: inny park, środek miasta i Dworzec Gdański nie zastępują właściwego miejsca", () => {
+  const near = { lat: 52.27, lon: 20.98 };
+  const c = (name: string, lat = 52.27, lon = 20.99, typeOk = true) => ({ lat, lon, name, source: "ors" as const, typeOk });
+  // przypadek z prawdziwej trasy: geokoder oddał "Park Mirowski" i "Warsaw" jako najlepsze trafienia
+  assert.equal(pickCandidate("Park Romualda Traugutta, Warszawa", "park", [c("Park Mirowski"), c("Warsaw")], near), null);
+  assert.equal(pickCandidate("Rynek Starego Miasta, Warszawa", "area", [c("Warsaw"), c("Warszawa")], near), null);
+  // poprawna nazwa wygrywa, także w innej odmianie i z dodatkowym słowem ("im.")
+  const ok = pickCandidate("Park Romualda Traugutta, Warszawa", "park", [c("Park Mirowski"), c("Park im. Romualda Traugutta", 52.265, 20.995)], near);
+  assert.equal(ok?.found, "Park im. Romualda Traugutta");
+  assert.equal(ok?.confidence, "high");
+  // sam nazwisko wystarcza, ale z niższą pewnością
+  const half = pickCandidate("Park Romualda Traugutta", "park", [c("Park Traugutta")], near);
+  assert.equal(half?.found, "Park Traugutta");
+  assert.equal(half?.confidence, "low");
+  // Most Gdański, nie Dworzec Gdański (rodzaj obiektu z opisu)
+  assert.equal(pickCandidate("Most Gdański, Warszawa", "bridge", [c("Dworzec Gdański", 52.26, 20.98), c("Most Gdański", 52.265, 21.015)], near)?.found, "Most Gdański");
+  // samo "kładka": znamy tylko rodzaj, więc pewność niska
+  assert.equal(pickCandidate("kładka pieszo-rowerowa przez Wisłę", "bridge", [c("Kładka Pieszo-Rowerowa")], near)?.confidence, "low");
+  // zbyt daleko od startu (inne miasto)
+  assert.equal(pickCandidate("Most Gdański", "bridge", [c("Most Gdański", 54.35, 18.65)], near), null);
+  // odmiana: "Gdańskim" -> "Gdański"
+  assert.ok(scoreName("Gdańskim", "Most Gdański").score >= 0.99);
+});
+
+test("trasa z opisu: miejsce znalezione tylko przez Photon, trasa omijająca miejsce daje ostrzeżenie", async () => {
+  const w = stubWorld({ stops: [{ query: "Kawiarnia Pod Mostem, Warszawa", kind: "place" }], green: true, quiet: true, unsupported: [] }, { photon: [{ geometry: { coordinates: [20.99, 52.275] }, properties: { name: "Kawiarnia Pod Mostem" } }] });
+  try {
+    const r = await planTextRoute(env, HOME, "z domu do kawiarni pod mostem i z powrotem");
+    assert.deepEqual(r.points.map((p) => p.name), ["Start", "Kawiarnia Pod Mostem", "Meta (start)"]);
+    assert.equal(r.points[1].found, "Kawiarnia Pod Mostem");
   } finally {
     w.restore();
   }
