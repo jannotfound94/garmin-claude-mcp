@@ -10,6 +10,9 @@ import {
   DAY_TYPE_PL,
   type DayType,
   type EnergyBase,
+  GARMIN_ACTIVE_HAIRCUT,
+  RUN_KCAL_PER_KG_KM,
+  DEFAULT_RUN_KM,
   type Macros,
   type Meal,
   type NutritionConfig,
@@ -17,6 +20,7 @@ import {
   classifyDay,
   computeTargets,
   estimateTdee,
+  goalProgress,
   evaluateReminders,
   fmtMacros,
   hhmmToMin,
@@ -65,11 +69,10 @@ export interface DayInfo {
   weightKg: number | null;
   targets: Targets | null;
   base: EnergyBase | null;
+  runKm: number | null;
+  activeTodayKcal: number | null;
   cfg: NutritionConfig;
 }
-
-/** Gramy aktywnych kalorii Garmina liczone z tym współczynnikiem: bywają zawyżone o 10–30%. */
-const GARMIN_ACTIVE_HAIRCUT = 0.85;
 
 function median(xs: number[]): number {
   const v = [...xs].sort((a, b) => a - b);
@@ -92,8 +95,12 @@ export async function energyBase(env: Env, today: string): Promise<EnergyBase | 
   );
   if (cal.ready) return { kcal: cal.tdeeKcal, source: "kalibracja" };
 
-  const cached = await st.getCache(`energybase:${today}`, 6 * 3600_000);
-  if (cached) return JSON.parse(cached) as EnergyBase;
+  // Klucz z wersją: zmiana sposobu liczenia nie może zwracać starej wartości z pamięci podręcznej.
+  const cached = await st.getCache(`energybase:v3:${today}`, 6 * 3600_000);
+  if (cached) {
+    const c = JSON.parse(cached) as EnergyBase;
+    if (c.source !== "garmin" || c.detail) return c;
+  }
   const g = garminClient(env);
   if (!g) return null;
   const rows = Object.values(await g.energy(addDays(today, -14), addDays(today, -1))).filter(
@@ -105,9 +112,17 @@ export async function energyBase(env: Env, today: string): Promise<EnergyBase | 
   const base: EnergyBase = {
     kcal: r0(median(day)),
     source: "garmin",
-    detail: { days: rows.length, resting: r0(median(rows.map((e) => e.resting!))), active: r0(median(rows.map((e) => e.active!))), min: r0(Math.min(...day)), max: r0(Math.max(...day)) },
+    detail: {
+      days: rows.length,
+      resting: r0(median(rows.map((e) => e.resting!))),
+      active: r0(median(rows.map((e) => e.active!))),
+      // Spokojny dzień: mediana aktywnych kcal z ok. jednej trzeciej dni z najmniejszym wysiłkiem (min. 3).
+      quietActive: r0(median([...rows].sort((a, b) => a.active! - b.active!).slice(0, Math.max(3, Math.round(rows.length / 3))).map((e) => e.active!))),
+      min: r0(Math.min(...day)),
+      max: r0(Math.max(...day)),
+    },
   };
-  await st.setCache(`energybase:${today}`, JSON.stringify(base));
+  await st.setCache(`energybase:v3:${today}`, JSON.stringify(base));
   return base;
 }
 
@@ -116,7 +131,7 @@ export async function dayInfo(env: Env, date: string): Promise<DayInfo> {
   const st = coach(env);
   const [cfg, weights] = await Promise.all([st.getNutCfg(), st.getWeights()]);
   const weightKg = weightStats(weights, date).last?.kg ?? cfg.weightFallbackKg;
-  let cls: { type: DayType; why: string } | null = null;
+  let cls: { type: DayType; why: string; km?: number } | null = null;
   const cached = await st.getCache(`daytype:${date}`, 20 * 60_000);
   if (cached) cls = JSON.parse(cached);
   else {
@@ -130,9 +145,35 @@ export async function dayInfo(env: Env, date: string): Promise<DayInfo> {
       cls = { type: "easy", why: `brak danych z intervals.icu (${String(e).slice(0, 60)}), przyjęto łatwy dzień` };
     }
   }
-  // Garmin nie ma własnego limitu czasu, a siedzimy w budżecie ~30 s pracy w tle: po 6 s cele liczą się z g/kg.
-  const base = await Promise.race([energyBase(env, date), new Promise<null>((r) => setTimeout(() => r(null), 6000))]).catch(() => null);
-  return { date, dayType: cls!.type, dayTypeWhy: cls!.why, weightKg, targets: computeTargets(cfg, weightKg, cls!.type, base), base, cfg };
+  // Garmin nie ma własnego limitu czasu, a siedzimy w budżecie ~30 s pracy w tle: po 6 s cele liczą się bez niego.
+  const timeout = <T,>(p: Promise<T>) => Promise.race([p, new Promise<null>((r) => setTimeout(() => r(null), 6000))]).catch(() => null);
+  const base = await timeout(energyBase(env, date));
+  // Dzisiejsze aktywne kcal z Garmina (cząstkowe do końca dnia): gdy przekraczają plan, cel rośnie do faktycznego spalania.
+  const activeTodayKcal = base?.source === "garmin" && date === warsaw().date ? await timeout(activeToday(env, date)) : null;
+  const runKm = cls!.km ?? null;
+  return {
+    date,
+    dayType: cls!.type,
+    dayTypeWhy: cls!.why,
+    weightKg,
+    targets: computeTargets(cfg, weightKg, cls!.type, base, { runKm, activeTodayKcal }),
+    base,
+    runKm,
+    activeTodayKcal,
+    cfg,
+  };
+}
+
+/** Aktywne kcal Garmina z dzisiejszego dnia do tej pory (pamięć podręczna 10 min). */
+async function activeToday(env: Env, date: string): Promise<number | null> {
+  const st = coach(env);
+  const cached = await st.getCache(`activetoday:${date}`, 10 * 60_000);
+  if (cached) return JSON.parse(cached) as number | null;
+  const g = garminClient(env);
+  if (!g) return null;
+  const v = (await g.energy(date, date))[date]?.active ?? null;
+  if (v != null) await st.setCache(`activetoday:${date}`, JSON.stringify(v));
+  return v;
 }
 
 const pl = (n: number) => String(n).replace(".", ",");
@@ -261,7 +302,7 @@ async function downloadTelegramFile(env: Env, fileId: string): Promise<{ b64: st
   return { b64: toBase64(buf), mime: mimeOf(info.file_path) };
 }
 
-const FAIL_HINT = "Spróbuj jeszcze raz za chwilę albo wpisz posiłek tekstem: /jem 2 jajka, kromka chleba, masło";
+const FAIL_HINT = "Spróbuj za chwilę jeszcze raz albo wrzuć posiłek tekstem: /jem 2 jajka, kromka chleba, masło";
 
 async function guard(env: Env, what: string, fn: () => Promise<void>) {
   try {
@@ -269,7 +310,7 @@ async function guard(env: Env, what: string, fn: () => Promise<void>) {
   } catch (e) {
     console.error(`diet:${what}`, e);
     const msg = String(e instanceof Error ? e.message : e).replace(/key=[^&\s]+/g, "key=…").slice(0, 180);
-    await say(env, `⚠️ ${what} się nie udało: ${msg}\n${FAIL_HINT}`).catch(() => {});
+    await say(env, `⚠️ Ups, coś nie pykło (${what}): ${msg}\n${FAIL_HINT}`).catch(() => {});
   }
 }
 
@@ -288,7 +329,7 @@ async function logPhoto(env: Env, msg: any) {
   const now = warsaw(new Date(msg.date * 1000));
   const a = await analyzeMeal(env, { image, note, nowLocal: now, slotNames: await slotNamesFor(env, now.date) });
   if (!a.isFood) {
-    await say(env, "Nie widzę na zdjęciu jedzenia ani napoju. Jeśli to jednak posiłek, dopisz opis (/jem ...).");
+    await say(env, "Janek, nie widzę tu żadnego jedzenia ani picia 🤔 Jak to jednak posiłek, dopisz opis: /jem …");
     return;
   }
   await storeAndAnnounce(env, a, { source: "photo", note, photoFileId: fileId, msgUnix: msg.date });
@@ -300,7 +341,7 @@ async function logText(env: Env, msg: any, text: string) {
   const at = warsaw(new Date(msg.date * 1000));
   const a = await analyzeMeal(env, { note: text, nowLocal: at, slotNames: await slotNamesFor(env, at.date) });
   if (!a.isFood) {
-    await say(env, "Nie wyłapałem z opisu żadnego jedzenia. Napisz np.: /jem owsianka 60 g z mlekiem i bananem");
+    await say(env, "Nie wyłapałem z tego nic do jedzenia. Napisz np.: /jem owsianka 60 g z mlekiem i bananem");
     return;
   }
   await storeAndAnnounce(env, a, { source: "text", note: text, msgUnix: msg.date });
@@ -311,7 +352,7 @@ async function correctMeal(env: Env, mealId: string, text: string, msg: any) {
   const st = coach(env);
   const meal = await st.findMeal(mealId);
   if (!meal) {
-    await say(env, "Nie znajduję tego posiłku (może został usunięty).");
+    await say(env, "Nie widzę już tego posiłku, chyba został usunięty.");
     return;
   }
   await tg(env, "sendChatAction", { chat_id: chatId(env), action: "typing" }).catch(() => {});
@@ -322,7 +363,7 @@ async function correctMeal(env: Env, mealId: string, text: string, msg: any) {
     slotNames: await slotNamesFor(env, meal.date),
   });
   if (!a.isFood) {
-    await say(env, "Nie zrozumiałem poprawki, nic nie zmieniłem. Napisz np.: „to było 200 g”, „bez sosu”, „to skyr naturalny”.");
+    await say(env, "Nie załapałem tej poprawki, niczego nie zmieniłem. Napisz np.: „to było 200 g”, „bez sosu”, „to skyr naturalny”.");
     return;
   }
   const { items, used } = await applyBarcode(a.items, a.barcode);
@@ -354,13 +395,13 @@ const norm = (s: string) =>
     .normalize("NFD")
     .replace(/[̀-ͯ]/g, "");
 
-const HELP = `🍽 Dietetyk: jak używać
-• Zdjęcie posiłku (+ opcjonalnie podpis jako notatka) zapisuje posiłek.
-• /jem 2 jajka, kromka chleba: posiłek z samego opisu (działa też „zjadłem …”).
-• Odpowiedz na wiadomość z posiłkiem, żeby go poprawić.
-• /dzis (lub /dzis wczoraj): posiłki, cele, bilans · /usun 2: usuń posiłek nr 2 z /dzis
-• /waga 82,5: waga · /ulubione: szybkie dodawanie
-• /posilki: plan posiłków i przypomnień · /cel: cele i ustawienia · /przypomnienia on|off
+const HELP = `🍽 Jak mnie używać, Janek
+• Wrzuć zdjęcie posiłku (podpis pod nim to notatka) i ja ogarniam resztę.
+• /jem 2 jajka, kromka chleba: to samo bez zdjęcia (działa też „zjadłem …”).
+• Pomyłka? Odpowiedz na wiadomość z posiłkiem, np. „to było 200 g”.
+• /dzis (albo /dzis wczoraj): co zjadłeś, cele, ile zostało · /usun 2: wywal posiłek nr 2
+• /waga 106,5: waga i postęp do celu · /ulubione: szybkie dodawanie
+• /posilki: Twoje pory jedzenia i przypomnienia · /cel: cele i ustawienia · /przypomnienia on|off
 • /spalanie: spalanie z Garmina dzień po dniu (skąd biorą się kalorie w celach)`;
 
 async function cmdToday(env: Env, arg: string) {
@@ -371,7 +412,7 @@ async function cmdToday(env: Env, arg: string) {
   const total = sumMacros(meals.map((m) => m.totals));
   const wd = warsaw(new Date(`${date}T12:00:00Z`)).weekdayPl;
   const lines = [`📅 <b>${h(wd)}, ${date}</b>`, ""];
-  if (!meals.length) lines.push("Brak zapisanych posiłków.");
+  if (!meals.length) lines.push("Na razie pusto: nic jeszcze nie wpisałeś.");
   else {
     lines.push("<b>Posiłki</b>");
     meals.forEach((m, i) => {
@@ -401,26 +442,35 @@ async function cmdDelete(env: Env, arg: string) {
   const n = Number(arg.trim());
   const meals = await st.getMeals(warsaw().date);
   if (!Number.isInteger(n) || n < 1 || n > meals.length) {
-    await say(env, `Podaj numer posiłku z /dzis (1–${meals.length || "?"}), np. /usun 2`);
+    await say(env, `Daj numer posiłku z /dzis (1–${meals.length || "?"}), np. /usun 2`);
     return;
   }
   const m = meals[n - 1];
   await st.deleteMeal(m.id);
-  await say(env, `🗑 Usunięto: ${m.time} ${m.label} (${m.totals.kcal} kcal).`);
+  await say(env, `🗑 Wywaliłem: ${m.time} ${m.label} (${m.totals.kcal} kcal).`);
 }
 
 async function cmdWeight(env: Env, arg: string) {
   const kg = Number(arg.trim().replace(",", ".").replace(/kg$/i, ""));
   if (!Number.isFinite(kg) || kg < 30 || kg > 250) {
-    await say(env, "Podaj wagę w kg, np. /waga 82,5");
+    await say(env, "Podaj wagę w kg, np. /waga 106,5");
     return;
   }
   const st = coach(env);
   const today = warsaw().date;
   await st.addWeight({ date: today, kg: r1(kg) });
-  const s = weightStats(await st.getWeights(), today);
-  const trend = s.deltaWeek !== null ? ` · średnia 7 dni ${s.avg7} kg (${s.deltaWeek > 0 ? "+" : ""}${s.deltaWeek} kg do poprzedniego tygodnia)` : s.avg7 !== null ? ` · średnia 7 dni ${s.avg7} kg` : "";
-  await say(env, `⚖️ Zapisano ${r1(kg)} kg${trend}.\nDzienna waga się waha o 1–2 kg, patrz na średnią tygodniową.`);
+  const cfg = await st.getNutCfg();
+  const gp = goalProgress(await st.getWeights(), cfg.goalWeightKg, today);
+  const lines = [`⚖️ Mam: ${pl(r1(kg))} kg.`];
+  if (cfg.goalWeightKg) {
+    const left = r1(kg - cfg.goalWeightKg);
+    lines.push(left > 0 ? `🎯 Do celu (${pl(cfg.goalWeightKg)} kg) zostało ${pl(left)} kg.` : `🎯 Cel ${pl(cfg.goalWeightKg)} kg zaliczony, jesteś ${pl(r1(-left))} kg poniżej. Respect!`);
+  }
+  if (gp.trendKgPerWeek !== null) {
+    lines.push(`📉 Trend z ostatnich tygodni: ${gp.trendKgPerWeek > 0 ? "+" : ""}${pl(gp.trendKgPerWeek)} kg tygodniowo${gp.weeksToGoal ? `, w tym tempie cel za ok. ${gp.weeksToGoal} tyg.` : ""}.`);
+  }
+  lines.push("Waga potrafi skakać o 1–2 kg z dnia na dzień, więc patrz na trend, nie na pojedynczy pomiar. Najlepiej ważyć się raz w tygodniu, rano, w podobnych warunkach.");
+  await say(env, lines.join("\n"));
 }
 
 async function cmdSlots(env: Env, arg: string) {
@@ -455,7 +505,7 @@ async function cmdSlots(env: Env, arg: string) {
   const patch: Record<string, string> = {};
   for (const s of slotsFor(cfg, local.weekday)) if (nowMin >= reminderDueMin(s, cfg.remindAfterMin)) patch[`${local.date}|${slotKey(s.name)}`] = "skip";
   await st.setReminders(patch, local.date);
-  await say(env, `✅ Zapisano plan ${weekend ? "na weekend" : "pn–pt"}: ${parsed.slots.map((s) => `${s.name} ${s.time}`).join("; ")}.\nPrzypomnę, jeśli nie będzie wpisu ${cfg.remindAfterMin / 60} h po planowanej godzinie.`);
+  await say(env, `✅ Masz plan ${weekend ? "na weekend" : "pn–pt"}: ${parsed.slots.map((s) => `${s.name} ${s.time}`).join("; ")}.\nJak ${cfg.remindAfterMin / 60} h po planowanej godzinie nie będzie wpisu, to Cię szturchnę.`);
 }
 
 const DAY_KEYS: Record<string, DayType> = { wolny: "rest", odpoczynek: "rest", lekki: "easy", latwy: "easy", akcent: "quality", tempo: "quality", dlugi: "long" };
@@ -477,6 +527,10 @@ async function cmdGoals(env: Env, arg: string) {
     } else if (what === "deficyt") {
       if (x >= 0 && x <= 700) await st.patchNutCfg({ deficitKcal: r0(x) });
       else err = "Deficyt: 0–700 kcal (dotyczy tylko dni bez biegu i łatwych).";
+    } else if (what === "cel") {
+      if (["off", "0", "brak"].includes(a ?? "")) await st.patchNutCfg({ goalWeightKg: null });
+      else if (x >= 40 && x <= 200) await st.patchNutCfg({ goalWeightKg: r1(x) });
+      else err = "Waga docelowa: 40–200 kg albo „off”.";
     } else if (what === "masa") {
       if (["auto", "off", "0", "waga"].includes(a ?? "")) await st.patchNutCfg({ macroWeightKg: null });
       else if (x >= 40 && x <= 200) await st.patchNutCfg({ macroWeightKg: r1(x) });
@@ -488,7 +542,7 @@ async function cmdGoals(env: Env, arg: string) {
       const cur = await st.getNutCfg();
       await st.patchNutCfg({ carbsPerKg: { ...cur.carbsPerKg, [DAY_KEYS[a]]: v(b) } });
     } else {
-      err = "Użycie: /cel deficyt 400 · /cel masa 95 · /cel bialko 1,8 · /cel tluszcz 1 · /cel wegle lekki 4,5 (wolny|lekki|akcent|dlugi) · /cel przypomnienie 180";
+      err = "Użycie: /cel deficyt 600 · /cel cel 95 (waga docelowa) · /cel masa 95 · /cel bialko 1,8 · /cel tluszcz 1 · /cel wegle lekki 4,5 (wolny|lekki|akcent|dlugi) · /cel przypomnienie 180";
     }
     if (err) {
       await say(env, `⚠️ ${err}`);
@@ -497,22 +551,23 @@ async function cmdGoals(env: Env, arg: string) {
   }
   const cfg = await st.getNutCfg();
   const w = weightStats(await st.getWeights(), warsaw().date).last?.kg ?? cfg.weightFallbackKg;
-  const ref = cfg.macroWeightKg ?? w;
+  const ref = cfg.macroWeightKg ?? (w && cfg.goalWeightKg ? Math.min(w, cfg.goalWeightKg) : w);
   const lines = [
-    `🎯 Cele · waga ${w ? `${pl(w)} kg` : "brak (/waga 82,5)"} · masa referencyjna ${cfg.macroWeightKg ? `${pl(cfg.macroWeightKg)} kg` : "jak waga (zmiana: /cel masa 95)"}`,
+    `🎯 Cele · waga ${w ? `${pl(w)} kg` : "brak (/waga 82,5)"} · docelowa ${cfg.goalWeightKg ? `${pl(cfg.goalWeightKg)} kg` : "brak (/cel cel 95)"} · gramy na kg liczone od ${ref ? `${pl(ref)} kg` : "wagi"}`,
     `Białko ${pl(cfg.proteinPerKg)} g/kg · tłuszcz ${pl(cfg.fatPerKg)} g/kg · deficyt ${cfg.deficitKcal} kcal (tylko dni bez biegu i łatwe)`,
   ];
   const base = await energyBase(env, warsaw().date).catch(() => null);
   lines.push(
     base
-      ? `Kcal z ${base.source === "kalibracja" ? "kalibracji (waga i spożycie)" : "mediany spalania z Garmina (kalorie aktywne ×0,85)"}: ok. ${base.kcal} kcal na przeciętny dzień` +
-        (base.detail ? `\n   ${base.detail.days} dni: spoczynkowe ${base.detail.resting} + aktywne ${base.detail.active} (zakres dni ${base.detail.min}–${base.detail.max}). Szczegóły: /spalanie` : "")
+      ? base.detail
+        ? `Kcal od spokojnego dnia z Garmina: spoczynkowe ${base.detail.resting} + lekka aktywność ${r0(GARMIN_ACTIVE_HAIRCUT * base.detail.quietActive)} (aktywne ×0,85), plus ok. ${RUN_KCAL_PER_KG_KM} kcal/kg/km planowanego biegu. Gdy Garmin pokaże dziś więcej wysiłku, cel rośnie. Szczegóły: /spalanie`
+        : `Kcal z kalibracji (waga i spożycie): ok. ${base.kcal} kcal na przeciętny dzień`
       : "Kcal z g/kg (brak danych o spalaniu: Garmin lub ≥ 3 tygodnie zapisów i wagi)",
     "",
   );
   for (const t of ["rest", "easy", "quality", "long"] as DayType[]) {
     const x = computeTargets(cfg, w, t, base);
-    lines.push(`• ${DAY_TYPE_PL[t]}: ${x ? `${x.kcal} kcal · B ${x.protein} · W ${x.carbs} (${pl(r1(x.carbs / (ref ?? 1)))} g/kg) · T ${x.fat}${x.deficitApplied > 0 ? ` · deficyt ${x.deficitApplied}` : ""}` : "brak wagi"}`);
+    lines.push(`• ${DAY_TYPE_PL[t]}${base?.detail && DEFAULT_RUN_KM[t] ? ` (ok. ${DEFAULT_RUN_KM[t]} km)` : ""}: ${x ? `${x.kcal} kcal · B ${x.protein} · W ${x.carbs} (${pl(r1(x.carbs / (ref ?? 1)))} g/kg) · T ${x.fat}${x.deficitApplied > 0 ? ` · deficyt ${x.deficitApplied}` : ""}` : "brak wagi"}`);
   }
   await say(env, lines.join("\n"));
 }
@@ -523,15 +578,15 @@ async function cmdFavorites(env: Env, arg: string) {
   const del = /^usun\s+(\d+)/.exec(norm(arg));
   if (del) {
     const ok = await st.removeFavorite(Number(del[1]) - 1);
-    await say(env, ok ? "Usunięto z ulubionych." : "Nie ma takiego numeru.");
+    await say(env, ok ? "Usunąłem z ulubionych." : "Nie ma takiego numeru.");
     return;
   }
   if (!favs.length) {
-    await say(env, "Brak ulubionych. Po zapisaniu posiłku stuknij ⭐ Ulubione pod wiadomością.");
+    await say(env, "Ulubionych jeszcze brak. Po zapisaniu posiłku stuknij ⭐ Ulubione pod wiadomością.");
     return;
   }
   const kb = favs.map((f, i) => [{ text: `${f.name} · ${sumMacros(f.items).kcal} kcal`.slice(0, 60), callback_data: `f:${i}` }]);
-  await say(env, "⭐ Stuknij, żeby dodać (teraz). Usuwanie: /ulubione usun 2", kb);
+  await say(env, "⭐ Stuknij, żeby dodać od razu. Usuwanie: /ulubione usun 2", kb);
 }
 
 async function cmdReminders(env: Env, arg: string) {
@@ -543,7 +598,7 @@ async function cmdReminders(env: Env, arg: string) {
     return;
   }
   await coach(env).patchNutCfg({ remindersOn: on });
-  await say(env, on ? "🔔 Przypomnienia włączone." : "🔕 Przypomnienia wyłączone (np. na urlop). Włączysz: /przypomnienia on");
+  await say(env, on ? "🔔 Przypomnienia włączone, będę Cię pilnował." : "🔕 Przypomnienia wyłączone (np. urlop). Włączysz: /przypomnienia on");
 }
 
 async function cmdBurn(env: Env) {
@@ -557,7 +612,17 @@ async function cmdBurn(env: Env) {
     lines.push(`${d.slice(5)}${d === today ? " (dziś, trwa)" : ""}: <b>${e.total != null ? r0(e.total) : "?"}</b> = ${e.resting != null ? r0(e.resting) : "?"} + ${e.active != null ? r0(e.active) : "?"}`);
   }
   const base = await energyBase(env, today).catch(() => null);
-  lines.push("", base?.detail ? `Baza do celów (mediana, aktywne ×0,85): <b>${base.kcal}</b> kcal` : "Za mało pełnych dni, żeby policzyć bazę.", "<i>Zobacz, czy któryś dzień ma nienaturalnie wysoką lub niską wartość.</i>");
+  const full = rows.filter(([d, e]) => d < today && e.total && e.resting != null && e.active != null);
+  const perDay = full.map(([, e]) => e.resting! + GARMIN_ACTIVE_HAIRCUT * e.active!).sort((a, b) => a - b);
+  lines.push("");
+  if (base?.detail) {
+    const d = base.detail;
+    lines.push(`Spokojny dzień (baza celów): <b>${d.resting} + ${r0(GARMIN_ACTIVE_HAIRCUT * d.quietActive)} = ${r0(d.resting + GARMIN_ACTIVE_HAIRCUT * d.quietActive)}</b> kcal (spoczynkowe + aktywne ×0,85 z najspokojniejszych dni)`);
+    lines.push(`Mediana wszystkich dni: ${base.kcal} kcal, najbardziej aktywny: ${r0(perDay[perDay.length - 1])} kcal`);
+    lines.push("Do tego cel dolicza bieg z planu, a gdy Garmin pokaże dziś więcej wysiłku, rośnie do faktycznego spalania.");
+  } else if (base) lines.push(`Baza do celów: <b>${base.kcal}</b> kcal (${base.source === "kalibracja" ? "z kalibracji wagi i spożycia" : "Garmin"})`);
+  else lines.push(`Za mało pełnych dni z danymi (jest ${full.length}, potrzeba min. 5), żeby policzyć bazę.`);
+  lines.push("<i>Duże rozrzuty między dniami oznaczają zwykle aktywności, o których cel nie wie z góry (spacery, góry, trening poza planem).</i>");
   await say(env, lines.join("\n"), undefined, true);
 }
 
@@ -572,7 +637,7 @@ const COMMANDS: Record<string, (env: Env, arg: string, msg: any) => Promise<void
   ulubione: (env, arg) => cmdFavorites(env, arg),
   przypomnienia: (env, arg) => cmdReminders(env, arg),
   jem: async (env, arg, msg) => {
-    if (!arg.trim()) await say(env, "Napisz, co zjadłeś, np. /jem owsianka 60 g z mlekiem i bananem");
+    if (!arg.trim()) await say(env, "Napisz, co wrzuciłeś na ząb, np. /jem owsianka 60 g z mlekiem i bananem");
     else await logText(env, msg, arg.trim());
   },
 };
@@ -591,7 +656,7 @@ export async function routeDietMessage(env: Env, msg: any, isEdit: boolean, ctx:
     if (isEdit) return true; // edycja podpisu nie dubluje wpisu
     const group = msg.media_group_id ? String(msg.media_group_id) : null;
     if (group && !(await coach(env).firstSeen("group", group))) {
-      ctx.waitUntil(say(env, "📎 W albumie przetwarzam tylko pierwsze zdjęcie. Resztę wyślij osobno lub dopisz /jem …").catch(() => {}));
+      ctx.waitUntil(say(env, "📎 Z albumu ogarniam tylko pierwsze zdjęcie. Resztę wrzuć osobno albo dopisz /jem …").catch(() => {}));
       return true;
     }
     ctx.waitUntil(guard(env, "Rozpoznanie zdjęcia", () => logPhoto(env, msg)));
@@ -692,14 +757,14 @@ export async function handleCallback(env: Env, cq: any): Promise<void> {
       }
       if (act === "skip") {
         await st.setReminders({ [key]: "skip" }, today);
-        await answer("Pominięte");
+        await answer("Okej, pominięte");
         await stripButtons();
       } else if (act === "later") {
         await st.setReminders({ [key]: `snooze:${new Date(Date.now() + 60 * 60_000).toISOString()}` }, today);
         await answer("Przypomnę za godzinę");
         await stripButtons();
       } else {
-        await answer("Wyślij zdjęcie lub opis 📸");
+        await answer("Wrzuć zdjęcie lub opis 📸");
       }
     } else await answer("");
   } catch (e) {
@@ -740,8 +805,8 @@ export async function runDietReminders(env: Env): Promise<void> {
     ];
     const text =
       d.attempt === 1
-        ? `🍽 Nie widzę wpisu: ${d.slot.name} (plan ${d.slot.time}). Wyślij zdjęcie lub krótki opis albo wybierz poniżej.`
-        : `🍽 Jeszcze raz o posiłku „${d.slot.name}” (plan ${d.slot.time}): zdjęcie, opis albo „Pominąłem”.`;
+        ? `🍽 Janek, nie widzę wpisu: ${d.slot.name} (plan ${d.slot.time}). Wrzuć zdjęcie albo krótki opis, albo kliknij poniżej.`
+        : `🍽 Jeszcze raz o „${d.slot.name}” (plan ${d.slot.time}), Janek: zdjęcie, opis albo „Pominąłem”.`;
     try {
       await say(env, text, buttons);
       patch[d.key] = d.attempt === 1 ? "sent" : "sent2";
@@ -806,7 +871,7 @@ export async function nutritionReport(env: Env, days: number) {
     teraz: { data: today, godzina: local.time },
     typ_dnia: { typ: DAY_TYPE_PL[info.dayType], powod: info.dayTypeWhy },
     cele_dzis: info.targets
-      ? { kcal: info.targets.kcal, bialko_g: info.targets.protein, weglowodany_g: info.targets.carbs, tluszcz_g: info.targets.fat, zrodlo_kcal: info.targets.source === "g/kg" ? "g/kg masy ciała (brak danych o spalaniu)" : info.targets.source === "garmin" ? `mediana spalania z Garmina z 14 dni (aktywne ×0,85): ${info.base?.kcal} kcal/dzień` : `kalibracja z wagi i spożycia: ${info.base?.kcal} kcal/dzień`, uwaga: info.targets.note }
+      ? { kcal: info.targets.kcal, bialko_g: info.targets.protein, weglowodany_g: info.targets.carbs, tluszcz_g: info.targets.fat, zrodlo_kcal: info.targets.source === "g/kg" ? "g/kg masy ciała (brak danych o spalaniu)" : info.targets.source === "garmin" ? `spokojny dzień z Garmina (spoczynkowe ${info.base?.detail?.resting} + aktywne ×0,85 z najspokojniejszych dni) plus bieg z planu (${info.runKm ?? "domyślny"} km); rośnie, gdy dzisiejszy wysiłek wg Garmina przekracza plan` : `kalibracja z wagi i spożycia: ${info.base?.kcal} kcal/dzień`, uwaga: info.targets.note }
       : "brak (Jan nie podał wagi: /waga)",
     spozycie_dzis: {
       ...tot,
@@ -822,10 +887,21 @@ export async function nutritionReport(env: Env, days: number) {
     srednia_7_dni_zalogowane: { dni_w_probce: last7.length, kcal: avg((d) => mealsOf(d.date).kcal), bialko_g: avg((d) => mealsOf(d.date).protein), weglowodany_g: avg((d) => mealsOf(d.date).carbs), tluszcz_g: avg((d) => mealsOf(d.date).fat) },
     waga: (() => {
       const s = weightStats(weights, today);
-      return { ostatnia: s.last, srednia_7_dni: s.avg7, zmiana_tydzien_do_tygodnia_kg: s.deltaWeek, pomiary_28_dni: s.count28 };
+      const gp = goalProgress(weights, cfg.goalWeightKg, today);
+      return {
+        ostatnia: s.last,
+        dni_od_ostatniego_wazenia: gp.daysSinceWeighIn,
+        waga_docelowa_kg: cfg.goalWeightKg,
+        do_celu_kg: gp.toGoKg,
+        tempo_kg_na_tydzien: gp.trendKgPerWeek,
+        prognoza_tygodni_do_celu: gp.weeksToGoal,
+        srednia_7_dni: s.avg7,
+        zmiana_tydzien_do_tygodnia_kg: s.deltaWeek,
+        pomiary_28_dni: s.count28,
+      };
     })(),
     kalibracja_zapotrzebowania: estimateTdee(intake, weights, today),
     garmin_uwagi: energyError ?? "Spalone = spoczynkowe + aktywne. Kalorie aktywne Garmina bywają zawyżone o 10–30%. Dzisiejsza wartość jest cząstkowa do końca dnia.",
-    ustawienia: { deficyt_kcal: cfg.deficitKcal, masa_referencyjna_kg: cfg.macroWeightKg, bialko_g_na_kg: cfg.proteinPerKg, tluszcz_g_na_kg: cfg.fatPerKg, weglowodany_g_na_kg: cfg.carbsPerKg, przypomnienia: cfg.remindersOn, plan_posilkow_pn_pt: cfg.slots, plan_posilkow_weekend: cfg.weekendSlots },
+    ustawienia: { deficyt_kcal: cfg.deficitKcal, waga_docelowa_kg: cfg.goalWeightKg, masa_referencyjna_kg: cfg.macroWeightKg, bialko_g_na_kg: cfg.proteinPerKg, tluszcz_g_na_kg: cfg.fatPerKg, weglowodany_g_na_kg: cfg.carbsPerKg, przypomnienia: cfg.remindersOn, plan_posilkow_pn_pt: cfg.slots, plan_posilkow_weekend: cfg.weekendSlots },
   };
 }

@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
+  goalProgress,
   DEFAULT_CONFIG, classifyDay, computeTargets, estimateTdee, evaluateReminders, labelForTime, normalizeItem,
   overallConfidence, parseSlots, satisfiedSlots, slotKey, slotsFor, sumMacros, weightSlopePerDay, weightStats, dateOfMealId, newMealId,
 } from "../src/nutrition";
@@ -8,7 +9,7 @@ import { parseAnalysis, applyBarcode, analyzeMeal } from "../src/gemini";
 
 const S = (t: string): any => (parseSlots(t) as any).slots;
 const cfg = { ...DEFAULT_CONFIG, slots: S("śniadanie 07:30; obiad 13:30; kolacja 19:30") };
-const C0 = { ...DEFAULT_CONFIG, deficitKcal: 0 };
+const C0 = { ...DEFAULT_CONFIG, deficitKcal: 0, goalWeightKg: null };
 const mins = (t: string) => Number(t.slice(0, 2)) * 60 + Number(t.slice(3));
 const ev = (o: any) => evaluateReminders({ cfg, date: "2026-11-16", weekday: "Mon", state: {}, nowIso: "2026-11-16T10:00:00Z", ...o });
 
@@ -88,11 +89,11 @@ test("targets: g/kg, deficit only easy/rest, carbs floor", () => {
   const t = computeTargets(C0, 80, "rest")!;
   assert.deepEqual([t.protein, t.carbs, t.fat], [144, 280, 80]);
   assert.equal(t.kcal, Math.round(144 * 4 + 280 * 4 + 80 * 9));
-  const d = { ...DEFAULT_CONFIG, deficitKcal: 400 };
+  const d = { ...DEFAULT_CONFIG, goalWeightKg: null, deficitKcal: 400 };
   assert.equal(computeTargets(d, 80, "easy")!.carbs, Math.round(360 - 100));
   assert.equal(computeTargets(d, 80, "long")!.carbs, 560);
   assert.match(computeTargets(d, 80, "long")!.note!, /bez deficytu/);
-  const big = computeTargets({ ...DEFAULT_CONFIG, deficitKcal: 700 }, 80, "rest")!; // 280 - 175 = 105 < podłoga 2 g/kg = 160 -> 160
+  const big = computeTargets({ ...DEFAULT_CONFIG, goalWeightKg: null, deficitKcal: 700 }, 80, "rest")!; // 280 - 175 = 105 < podłoga 2 g/kg = 160 -> 160
   assert.equal(big.carbs, 160);
   assert.ok(big.deficitApplied < 700 && big.note);
   assert.equal(computeTargets(C0, null, "rest"), null);
@@ -199,7 +200,7 @@ test("targets from energy base: day factor, deficit only rest/easy, carbs fill t
   assert.equal(e.carbs, 339);
   assert.ok(Math.abs(e.kcal - 3090) <= 3, String(e.kcal));
   assert.equal(e.source, "garmin");
-  const d = { ...DEFAULT_CONFIG, deficitKcal: 300 };
+  const d = { ...DEFAULT_CONFIG, goalWeightKg: null, deficitKcal: 300 };
   const rest = computeTargets(d, 80, "rest", base)!; // B 144, T 80 -> 2790 - 300 = 2490
   assert.ok(Math.abs(rest.kcal - (3000 * 0.93 - 300)) <= 3, String(rest.kcal));
   assert.equal(rest.deficitApplied, 300);
@@ -218,7 +219,7 @@ test("targets from energy base: day factor, deficit only rest/easy, carbs fill t
   assert.equal(ref.fat, 90);
   assert.equal(ref.deficitApplied, 300);
   assert.ok(Math.abs(ref.kcal - (3000 * 0.93 - 300)) <= 3, String(ref.kcal));
-  const tight = computeTargets({ ...DEFAULT_CONFIG, deficitKcal: 700 }, 107, "rest", { kcal: 2500, source: "kalibracja" })!;
+  const tight = computeTargets({ ...DEFAULT_CONFIG, goalWeightKg: null, deficitKcal: 700 }, 107, "rest", { kcal: 2500, source: "kalibracja" })!;
   assert.equal(tight.carbs, Math.round(2 * 107)); // podłoga 2 g/kg
   assert.match(tight.note!, /minimum/);
   // bez bazy: stare zachowanie z g/kg
@@ -257,4 +258,65 @@ test("analyzeMeal: timeout on primary falls back to the second model; message in
     globalThis.fetch = (async () => { throw timeout(); }) as any;
     await assert.rejects(analyzeMeal({ GEMINI_API_KEY: "k" } as any, input), (e: Error) => /brak odpowiedzi w ciągu/.test(e.message) && !/aborted/.test(e.message));
   } finally { globalThis.fetch = orig; }
+});
+
+test("targets from quiet-day baseline: planned run added, actual Garmin effort raises the target", () => {
+  const base = { kcal: 3500, source: "garmin" as const, detail: { days: 14, resting: 2500, active: 1500, quietActive: 400, min: 2700, max: 5500 } };
+  const quietActive = 0.85 * 400; // 340
+  const C = { ...DEFAULT_CONFIG, deficitKcal: 0, macroWeightKg: null, goalWeightKg: null };
+  const rest = computeTargets(C, 100, "rest", base)!;
+  assert.ok(Math.abs(rest.kcal - (2500 + quietActive)) <= 3, String(rest.kcal)); // 2840
+  const easy = computeTargets(C, 100, "easy", base, { runKm: 5 })!; // + 0.9*100*5 = 450
+  assert.ok(Math.abs(easy.kcal - (2500 + quietActive + 450)) <= 3, String(easy.kcal));
+  const long = computeTargets(C, 100, "long", base, { runKm: 20 })!; // + 1800
+  assert.ok(Math.abs(long.kcal - (2500 + quietActive + 1800)) <= 3, String(long.kcal));
+  // bez dystansu: domyślny km dla typu dnia (easy 6)
+  assert.ok(Math.abs(computeTargets(C, 100, "easy", base)!.kcal - (2500 + quietActive + 540)) <= 3);
+  // niezaplanowany wysiłek: Garmin pokazuje dziś 2000 aktywnych kcal na dzień bez biegu -> cel = 2500 + 0.85*2000
+  const hike = computeTargets(C, 100, "rest", base, { activeTodayKcal: 2000 })!;
+  assert.ok(Math.abs(hike.kcal - (2500 + 1700)) <= 3, String(hike.kcal));
+  assert.match(hike.note!, /Garmin pokazuje dziś większy wysiłek/);
+  // mały wysiłek dzisiaj (cząstkowy dzień) nie obniża celu poniżej planu
+  assert.ok(Math.abs(computeTargets(C, 100, "easy", base, { runKm: 5, activeTodayKcal: 100 })!.kcal - (2500 + quietActive + 450)) <= 3);
+  // deficyt tylko dni bez biegu i łatwe
+  const D = { ...C, deficitKcal: 300 }; // przy 500 podłoga węglowodanów (2 g/kg) ograniczyłaby deficyt
+  assert.ok(Math.abs(computeTargets(D, 100, "rest", base)!.kcal - (2840 - 300)) <= 3);
+  assert.equal(computeTargets(D, 100, "rest", base)!.deficitApplied, 300);
+  assert.ok(Math.abs(computeTargets(D, 100, "long", base, { runKm: 20 })!.kcal - (2500 + quietActive + 1800)) <= 3);
+});
+
+test("classifyDay reports distance (larger of plan and done)", () => {
+  assert.equal(classifyDay([{ type: "Run", category: "WORKOUT", name: "Bieg 5 km", distance: 5000 }], []).km, 5);
+  assert.equal(classifyDay([{ type: "Run", category: "WORKOUT", name: "Bieg 5 km", distance: 5000 }], [{ type: "Run", distance: 8200 }]).km, 8.2);
+  assert.equal(classifyDay([], []).km, 0);
+});
+
+test("defaults: deficit 600 and goal weight 95; macros use the lower of weight and goal", () => {
+  assert.equal(DEFAULT_CONFIG.deficitKcal, 600);
+  assert.equal(DEFAULT_CONFIG.goalWeightKg, 95);
+  const heavy = computeTargets({ ...DEFAULT_CONFIG, deficitKcal: 0 }, 107, "rest")!; // od 95 kg
+  assert.equal(heavy.protein, Math.round(1.8 * 95));
+  assert.equal(heavy.fat, 95);
+  const lighter = computeTargets({ ...DEFAULT_CONFIG, deficitKcal: 0 }, 90, "rest")!; // poniżej celu: od aktualnej wagi
+  assert.equal(lighter.protein, Math.round(1.8 * 90));
+  // jawna masa referencyjna ma pierwszeństwo przed celem
+  assert.equal(computeTargets({ ...DEFAULT_CONFIG, deficitKcal: 0, macroWeightKg: 100 }, 107, "rest")!.protein, 180);
+});
+
+test("goalProgress: remaining kg, trend and weeks to goal; rare weigh-ins give no trend", () => {
+  const today = "2026-12-14";
+  const day = (n: number) => new Date(Date.parse(`${today}T12:00:00Z`) - n * 86400000).toISOString().slice(0, 10);
+  const w = [28, 21, 14, 7, 0].map((n, i) => ({ date: day(n), kg: 107 - 0.5 * i })); // -0.5 kg/tydz.
+  const g = goalProgress(w, 95, today);
+  assert.equal(g.last!.kg, 105);
+  assert.equal(g.toGoKg, 10);
+  assert.ok(Math.abs(g.trendKgPerWeek! + 0.5) < 0.05, String(g.trendKgPerWeek));
+  assert.ok(g.weeksToGoal! >= 19 && g.weeksToGoal! <= 21, String(g.weeksToGoal));
+  assert.equal(g.daysSinceWeighIn, 0);
+  const rare = goalProgress([{ date: day(40), kg: 107 }, { date: day(3), kg: 106 }], 95, today);
+  assert.equal(rare.trendKgPerWeek, null);
+  assert.equal(rare.weeksToGoal, null);
+  assert.equal(rare.daysSinceWeighIn, 3);
+  assert.equal(goalProgress([], 95, today).toGoKg, null);
+  assert.equal(goalProgress(w, 106, today).weeksToGoal, null); // cel już osiągnięty
 });

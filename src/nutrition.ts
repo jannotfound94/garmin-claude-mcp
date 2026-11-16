@@ -60,6 +60,8 @@ export interface NutritionConfig {
    * Przy nadwadze gramy na kg od całej masy dają tyle białka i tłuszczu, że deficyt się nie mieści: wtedy ustaw masę bliżej docelowej.
    */
   macroWeightKg: number | null;
+  /** Docelowa waga. Gdy nie ma jawnej masy referencyjnej, gramy na kg liczone są od niższej z wagi i celu. */
+  goalWeightKg: number | null;
   weightFallbackKg: number | null;
 }
 
@@ -71,8 +73,9 @@ export const DEFAULT_CONFIG: NutritionConfig = {
   proteinPerKg: 1.8,
   fatPerKg: 1.0,
   carbsPerKg: { rest: 3.5, easy: 4.5, quality: 6, long: 7 },
-  deficitKcal: 400, // Jan chce zredukować masę ciała (patrz TRENER.md); /cel deficyt 0 wyłącza
+  deficitKcal: 600, // Janek redukuje masę ciała 107 -> 95 kg (patrz TRENER.md); /cel deficyt 0 wyłącza
   macroWeightKg: null,
+  goalWeightKg: 95,
   weightFallbackKg: null,
 };
 
@@ -294,17 +297,20 @@ const LONG_MIN = 100 * 60;
  * Typ dnia z planu i z tego, co faktycznie zrobiono (bierze cięższy). Wejście: surowe obiekty z intervals.icu.
  * Nie-biegowe aktywności (spacer, siłownia) nie zmieniają typu dnia.
  */
-export function classifyDay(events: any[], activities: any[]): { type: DayType; why: string } {
+export function classifyDay(events: any[], activities: any[]): { type: DayType; why: string; km: number } {
   const rank: Record<DayType, number> = { rest: 0, easy: 1, quality: 2, long: 3 };
   let best: { type: DayType; why: string } = { type: "rest", why: "brak biegu w planie i w aktywnościach" };
   const consider = (type: DayType, why: string) => {
     if (rank[type] > rank[best.type]) best = { type, why };
   };
   const isRun = (x: any) => /run/i.test(String(x?.type ?? ""));
+  let plannedKm = 0;
+  let actualKm = 0;
   for (const e of events) {
     if (e?.category && e.category !== "WORKOUT") continue;
     if (!isRun(e)) continue;
     const km = (e.distance ?? 0) / 1000;
+    plannedKm += km;
     const secs = e.moving_time ?? 0;
     const text = `${e.name ?? ""} ${e.description ?? ""}`;
     if (km >= LONG_KM || secs >= LONG_MIN || LONG_RE.test(e.name ?? "")) consider("long", `plan: ${e.name ?? "bieg"}`);
@@ -314,14 +320,23 @@ export function classifyDay(events: any[], activities: any[]): { type: DayType; 
   for (const a of activities) {
     if (!isRun(a)) continue;
     const km = (a.distance ?? a.icu_distance ?? 0) / 1000;
+    actualKm += km;
     const secs = a.moving_time ?? 0;
     if (km >= LONG_KM || secs >= LONG_MIN) consider("long", `wykonany bieg ${r1(km)} km`);
     else if (km >= 1) consider("easy", `wykonany bieg ${r1(km)} km`);
   }
-  return best;
+  // Dystans: większy z planu i z tego, co zrobiono (bieg zrobiony dłużej niż w planie liczy się naprawdę).
+  return { ...best, km: r1(Math.max(plannedKm, actualKm)) };
 }
 
 export type TargetSource = "kalibracja" | "garmin" | "g/kg";
+/** Kontekst dnia: dystans biegu (plan lub wykonany) i aktywne kcal Garmina zebrane dotąd dzisiaj. */
+export interface TargetCtx {
+  runKm?: number | null;
+  activeTodayKcal?: number | null;
+}
+export const RUN_KCAL_PER_KG_KM = 0.9; // koszt netto biegu (z zapasem na zawyżanie przez zegarki)
+export const DEFAULT_RUN_KM: Record<DayType, number> = { rest: 0, easy: 6, quality: 8, long: 18 };
 export interface Targets extends Macros {
   dayType: DayType;
   deficitApplied: number;
@@ -332,10 +347,11 @@ export interface EnergyBase {
   kcal: number; // dzienne zapotrzebowanie "przeciętnego" dnia
   source: Exclude<TargetSource, "g/kg">;
   /** Tylko dla źródła "garmin": z czego policzono (mediany dzienne), do wglądu w /cel i /spalanie. */
-  detail?: { days: number; resting: number; active: number; min: number; max: number };
+  detail?: { days: number; resting: number; active: number; quietActive: number; min: number; max: number };
 }
 
 /** Zapotrzebowanie danego typu dnia względem średniej z tygodnia z ok. 3 biegami (dzień bez biegu poniżej, długi bieg wyraźnie powyżej). */
+export const GARMIN_ACTIVE_HAIRCUT = 0.85; // aktywne kcal Garmina bywają zawyżone o 10–30%
 export const DAY_FACTOR: Record<DayType, number> = { rest: 0.93, easy: 1.03, quality: 1.08, long: 1.2 };
 export const MIN_CARBS_PER_KG = 2; // poniżej tego (g na kg masy referencyjnej) biegaczowi nie schodzimy nawet w deficycie
 
@@ -345,9 +361,9 @@ export const MIN_CARBS_PER_KG = 2; // poniżej tego (g na kg masy referencyjnej)
  * dopełniają resztę. Bez tych danych cele liczone są czysto z g/kg (węglowodany wg typu dnia). Deficyt zawsze kosztem
  * węglowodanów, nigdy białka, i nigdy w dni akcentów i długich biegów.
  */
-export function computeTargets(cfg: NutritionConfig, weightKg: number | null, dayType: DayType, base?: EnergyBase | null): Targets | null {
+export function computeTargets(cfg: NutritionConfig, weightKg: number | null, dayType: DayType, base?: EnergyBase | null, ctx?: TargetCtx): Targets | null {
   if (!weightKg || weightKg < 30 || weightKg > 250) return null;
-  const refKg = cfg.macroWeightKg ?? weightKg; // masa, od której liczymy gramy na kg
+  const refKg = cfg.macroWeightKg ?? (cfg.goalWeightKg ? Math.min(weightKg, cfg.goalWeightKg) : weightKg); // masa, od której liczymy gramy na kg
   const protein = cfg.proteinPerKg * refKg;
   const fat = cfg.fatPerKg * refKg;
   const deficitDay = dayType === "rest" || dayType === "easy";
@@ -357,13 +373,26 @@ export function computeTargets(cfg: NutritionConfig, weightKg: number | null, da
   let deficit = 0;
 
   if (base && base.kcal > 0) {
-    let kcal = base.kcal * DAY_FACTOR[dayType];
+    let kcal: number;
+    let raised = 0;
+    if (base.source === "garmin" && base.detail) {
+      // Od spokojnego dnia (spoczynkowe + lekka aktywność) w górę: bieg z planu doliczany z góry, a gdy Garmin pokazuje dziś
+      // więcej wysiłku niż w planie (spacer, góry, dłuższy bieg), cel rośnie do faktycznego spalania.
+      const quietActive = GARMIN_ACTIVE_HAIRCUT * base.detail.quietActive;
+      const runKcal = RUN_KCAL_PER_KG_KM * weightKg * (ctx?.runKm ?? DEFAULT_RUN_KM[dayType]);
+      const planned = quietActive + runKcal;
+      const actual = ctx?.activeTodayKcal != null ? GARMIN_ACTIVE_HAIRCUT * ctx.activeTodayKcal : 0;
+      const active = Math.max(planned, actual);
+      raised = Math.max(0, actual - planned);
+      kcal = base.detail.resting + active;
+    } else kcal = base.kcal * DAY_FACTOR[dayType];
     if (cfg.deficitKcal > 0) {
       if (deficitDay) {
         deficit = cfg.deficitKcal;
         kcal -= deficit;
       } else note = "Dzień mocnego treningu: bez deficytu, pełne paliwo.";
     }
+    if (raised > 50) note = `Cel podniesiony o ok. ${r0(raised)} kcal: Garmin pokazuje dziś większy wysiłek niż w planie.`;
     carbs = (kcal - 4 * protein - 9 * fat) / 4;
     if (carbs < floorCarbs) {
       deficit = Math.max(0, deficit - (floorCarbs - carbs) * 4);
@@ -417,6 +446,23 @@ export function weightStats(weights: Weight[], today: string) {
     avgPrev7: ap,
     deltaWeek: a7 !== null && ap !== null ? r1(a7 - ap) : null,
     count28: within(27).length,
+  };
+}
+
+/** Postęp do wagi docelowej: ile zostało, tempo z regresji (jeśli są dane) i orientacyjna prognoza w tygodniach. */
+export function goalProgress(weights: Weight[], goalKg: number | null, today: string) {
+  const s = weightStats(weights, today);
+  const slope = weightSlopePerDay(weights, today, 28);
+  const trend = slope === null ? null : r1(slope * 7); // kg na tydzień
+  const toGo = s.last && goalKg ? r1(s.last.kg - goalKg) : null;
+  const weeksToGoal = toGo !== null && toGo > 0 && trend !== null && trend < -0.05 ? Math.ceil(toGo / -trend) : null;
+  return {
+    last: s.last,
+    daysSinceWeighIn: s.last ? daysBetween(s.last.date, today) : null,
+    goalKg,
+    toGoKg: toGo,
+    trendKgPerWeek: trend,
+    weeksToGoal,
   };
 }
 

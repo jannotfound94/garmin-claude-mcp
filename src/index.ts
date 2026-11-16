@@ -18,6 +18,7 @@ import { addDays, daysBetween, fmtWarsaw, warsaw, warsawToUtc } from "./time";
 export { CoachState } from "./state";
 
 const MARATHON_DATE = "2027-04-25";
+const MARATHON_GOAL = { czas: "poniżej 4:30:00", tempo_srednie: "ok. 6:23/km", uwaga: "cel drugorzędny wobec ukończenia bez kontuzji" };
 
 /** Home by default; a location shared on Telegram overrides it for a while (see location.ts). */
 async function currentLocation(env: Env) {
@@ -288,6 +289,7 @@ export class MyMCP extends McpAgent<Env> {
       "Zmienia ustawienia dietetyka Jana, gdy sam o to poprosi lub gdy ustalicie cel (np. redukcja). Zmieniaj tylko to, co wynika z rozmowy. Deficyt dotyczy wyłącznie dni bez biegu i łatwych; w dni akcentów i długich biegów serwer go ignoruje.",
       {
         deficitKcal: z.number().min(0).max(700).optional().describe("Dzienny deficyt kcal (0 = utrzymanie)"),
+        goalWeightKg: z.number().min(40).max(200).nullable().optional().describe("Waga docelowa (kg), null = brak celu"),
         macroWeightKg: z.number().min(40).max(200).nullable().optional().describe("Masa referencyjna (kg), od której liczone są gramy na kg (białko, tłuszcz, minimum węglowodanów). null = aktualna waga. Przy nadwadze ustaw bliżej docelowej, inaczej deficyt się nie mieści."),
         proteinPerKg: z.number().min(1.2).max(2.5).optional(),
         fatPerKg: z.number().min(0.6).max(1.5).optional(),
@@ -310,7 +312,7 @@ export class MyMCP extends McpAgent<Env> {
           ...rest,
           ...(carbsPerKg ? { carbsPerKg: { ...cur.carbsPerKg, ...Object.fromEntries(Object.entries(carbsPerKg).filter(([, v]) => v !== undefined)) } } : {}),
         });
-        return text({ deficyt_kcal: next.deficitKcal, masa_referencyjna_kg: next.macroWeightKg, bialko_g_na_kg: next.proteinPerKg, tluszcz_g_na_kg: next.fatPerKg, weglowodany_g_na_kg: next.carbsPerKg, przypomnienie_po_min: next.remindAfterMin });
+        return text({ deficyt_kcal: next.deficitKcal, waga_docelowa_kg: next.goalWeightKg, masa_referencyjna_kg: next.macroWeightKg, bialko_g_na_kg: next.proteinPerKg, tluszcz_g_na_kg: next.fatPerKg, weglowodany_g_na_kg: next.carbsPerKg, przypomnienie_po_min: next.remindAfterMin });
       },
     );
 
@@ -342,6 +344,7 @@ export class MyMCP extends McpAgent<Env> {
         return text({
           teraz: { data: local.date, dzien: local.weekdayPl, godzina: local.time, strefa: "Europe/Warsaw" },
           dni_do_maratonu: daysBetween(local.date, MARATHON_DATE),
+          cel_maratonu: MARATHON_GOAL,
           powody_pobudki: mem.lastWakeReasons,
           instrukcja_trenera: TRENER,
           pamiec: {
@@ -567,7 +570,7 @@ async function handleSetup(request: Request, env: Env, origin: string): Promise<
           allowed_updates: ["message", "edited_message", "callback_query"],
           drop_pending_updates: false,
         });
-        await sendTelegram(env, "Trener podłączony ✅ Od teraz odpowiadam na Twoje wiadomości na bieżąco.");
+        await sendTelegram(env, "Trener podłączony ✅ Jestem na posterunku, Janek. Pisz śmiało.");
         notice = "Webhook ustawiony, wiadomość testowa wysłana.";
         break;
       case "wake":
