@@ -65,6 +65,8 @@ Wyślij botowi kolejno:
 | Usunąć wpis | przycisk 🗑 pod wiadomością albo `/usun 2` (numer z `/dzis`) |
 | Szybko dodać to, co jesz często | po zapisaniu stuknij ⭐ **Ulubione**; potem `/ulubione` i jedno stuknięcie |
 | Zobaczyć dzień | `/dzis` lub `/dzis wczoraj`: posiłki, cele, ile zostało, spalanie z Garmina |
+| Sprawdzić, skąd kalorie w celach | `/spalanie`: spalanie z Garmina dzień po dniu (spoczynkowe + aktywne) i baza do celów |
+| Kilka komend naraz | każda w osobnej linii jednej wiadomości, np. `/waga 106` i pod spodem `/dzis`; wykonają się po kolei (jedno `/jem` na wiadomość) |
 | Wyłączyć przypomnienia (urlop) | `/przypomnienia off` |
 | Zobaczyć pomoc | `/dieta` |
 
@@ -80,7 +82,7 @@ Gdy model nie jest pewny składnika, który wyraźnie zmienia wynik, zadaje jedn
 ## Jak to liczy cele
 
 **Kalorie dnia** wynikają z Twojego rzeczywistego zapotrzebowania:
-1. Na początku: średnie spalanie z Garmina z ostatnich 14 dni (spoczynkowe + aktywne × 0,85, bo kalorie aktywne bywają zawyżone).
+1. Na początku: **mediana** dziennego spalania z Garmina z ostatnich 14 dni (spoczynkowe + aktywne × 0,85, bo kalorie aktywne bywają zawyżone). Mediana, żeby pojedynczy dziwny dzień nie zawyżał celu. Dzień po dniu zobaczysz to komendą `/spalanie`.
 2. Po ok. 3–4 tygodniach (min. 14 zapisanych dni i 4 ważenia): zapotrzebowanie wyliczone z bilansu spożycia i trendu wagi. To dokładniejsze niż Garmin i zastępuje go automatycznie.
 3. Bez żadnych z tych danych: cele liczone czysto z gramów na kg masy ciała.
 

@@ -71,6 +71,12 @@ export interface DayInfo {
 /** Gramy aktywnych kalorii Garmina liczone z tym współczynnikiem: bywają zawyżone o 10–30%. */
 const GARMIN_ACTIVE_HAIRCUT = 0.85;
 
+function median(xs: number[]): number {
+  const v = [...xs].sort((a, b) => a - b);
+  const m = v.length >> 1;
+  return v.length % 2 ? v[m] : (v[m - 1] + v[m]) / 2;
+}
+
 /**
  * Rzeczywiste dzienne zapotrzebowanie, od którego liczymy cel kcal: kalibracja z wagi i spożycia, gdy są dane (≥ 3 tygodnie),
  * w przeciwnym razie średnia spalania z Garmina z 14 dni (spoczynkowe + aktywne × 0,85). Bez żadnego z nich: null.
@@ -90,12 +96,17 @@ export async function energyBase(env: Env, today: string): Promise<EnergyBase | 
   if (cached) return JSON.parse(cached) as EnergyBase;
   const g = garminClient(env);
   if (!g) return null;
-  const rows = Object.entries(await g.energy(addDays(today, -14), addDays(today, -1)))
-    .map(([, e]) => e)
-    .filter((e) => e.total && e.total > 0 && e.resting != null && e.active != null);
+  const rows = Object.values(await g.energy(addDays(today, -14), addDays(today, -1))).filter(
+    (e) => e.total && e.total > 0 && e.resting != null && e.active != null,
+  );
   if (rows.length < 5) return null;
-  const avg = (f: (e: (typeof rows)[number]) => number) => rows.reduce((a, e) => a + f(e), 0) / rows.length;
-  const base: EnergyBase = { kcal: r0(avg((e) => e.resting!) + GARMIN_ACTIVE_HAIRCUT * avg((e) => e.active!)), source: "garmin" };
+  // Mediana, nie średnia: pojedynczy dziwny dzień (np. błąd synchronizacji zegarka) nie zawyża celu.
+  const day = rows.map((e) => e.resting! + GARMIN_ACTIVE_HAIRCUT * e.active!);
+  const base: EnergyBase = {
+    kcal: r0(median(day)),
+    source: "garmin",
+    detail: { days: rows.length, resting: r0(median(rows.map((e) => e.resting!))), active: r0(median(rows.map((e) => e.active!))), min: r0(Math.min(...day)), max: r0(Math.max(...day)) },
+  };
   await st.setCache(`energybase:${today}`, JSON.stringify(base));
   return base;
 }
@@ -144,8 +155,8 @@ function dayBlock(have: Macros, info: DayInfo | null, title = "Dziś"): string[]
   const left = t.kcal - have.kcal;
   const lines = [
     `📊 <b>${title}</b> · ${h(DAY_TYPE_PL[t.dayType])}`,
-    `🔥 <b>${r0(have.kcal)}</b> / ${t.kcal} kcal  ${bar(have.kcal, t.kcal)}`,
-    left >= 0 ? `     zostało ${r0(left)} kcal` : `     ponad celem o ${r0(-left)} kcal`,
+    `🔥 <b>${r0(have.kcal)}</b> / ${t.kcal} kcal`,
+    `${bar(have.kcal, t.kcal)}  ${Math.round((have.kcal / t.kcal) * 100)}% · ${left >= 0 ? `zostało ${r0(left)} kcal` : `ponad celem o ${r0(-left)} kcal`}`,
     `🥩 Białko: ${r0(have.protein)} / ${t.protein} g`,
     `🍞 Węglowodany: ${r0(have.carbs)} / ${t.carbs} g`,
     `🥑 Tłuszcz: ${r0(have.fat)} / ${t.fat} g`,
@@ -349,7 +360,8 @@ const HELP = `🍽 Dietetyk: jak używać
 • Odpowiedz na wiadomość z posiłkiem, żeby go poprawić.
 • /dzis (lub /dzis wczoraj): posiłki, cele, bilans · /usun 2: usuń posiłek nr 2 z /dzis
 • /waga 82,5: waga · /ulubione: szybkie dodawanie
-• /posilki: plan posiłków i przypomnień · /cel: cele i ustawienia · /przypomnienia on|off`;
+• /posilki: plan posiłków i przypomnień · /cel: cele i ustawienia · /przypomnienia on|off
+• /spalanie: spalanie z Garmina dzień po dniu (skąd biorą się kalorie w celach)`;
 
 async function cmdToday(env: Env, arg: string) {
   const st = coach(env);
@@ -493,7 +505,8 @@ async function cmdGoals(env: Env, arg: string) {
   const base = await energyBase(env, warsaw().date).catch(() => null);
   lines.push(
     base
-      ? `Kcal z ${base.source === "kalibracja" ? "kalibracji (waga i spożycie)" : "średniego spalania z Garmina (14 dni, kalorie aktywne ×0,85)"}: ok. ${base.kcal} kcal na przeciętny dzień`
+      ? `Kcal z ${base.source === "kalibracja" ? "kalibracji (waga i spożycie)" : "mediany spalania z Garmina (kalorie aktywne ×0,85)"}: ok. ${base.kcal} kcal na przeciętny dzień` +
+        (base.detail ? `\n   ${base.detail.days} dni: spoczynkowe ${base.detail.resting} + aktywne ${base.detail.active} (zakres dni ${base.detail.min}–${base.detail.max}). Szczegóły: /spalanie` : "")
       : "Kcal z g/kg (brak danych o spalaniu: Garmin lub ≥ 3 tygodnie zapisów i wagi)",
     "",
   );
@@ -533,7 +546,23 @@ async function cmdReminders(env: Env, arg: string) {
   await say(env, on ? "🔔 Przypomnienia włączone." : "🔕 Przypomnienia wyłączone (np. na urlop). Włączysz: /przypomnienia on");
 }
 
+async function cmdBurn(env: Env) {
+  const g = garminClient(env);
+  if (!g) return void (await say(env, "Garmin Connect nie jest podłączony."));
+  const today = warsaw().date;
+  const days = await g.energy(addDays(today, -14), today);
+  const rows = Object.entries(days).sort(([a], [b]) => a.localeCompare(b));
+  const lines = ["⌚ <b>Spalanie z Garmina</b> (kcal: razem = spoczynkowe + aktywne)", ""];
+  for (const [d, e] of rows) {
+    lines.push(`${d.slice(5)}${d === today ? " (dziś, trwa)" : ""}: <b>${e.total != null ? r0(e.total) : "?"}</b> = ${e.resting != null ? r0(e.resting) : "?"} + ${e.active != null ? r0(e.active) : "?"}`);
+  }
+  const base = await energyBase(env, today).catch(() => null);
+  lines.push("", base?.detail ? `Baza do celów (mediana, aktywne ×0,85): <b>${base.kcal}</b> kcal` : "Za mało pełnych dni, żeby policzyć bazę.", "<i>Zobacz, czy któryś dzień ma nienaturalnie wysoką lub niską wartość.</i>");
+  await say(env, lines.join("\n"), undefined, true);
+}
+
 const COMMANDS: Record<string, (env: Env, arg: string, msg: any) => Promise<void>> = {
+  spalanie: (env) => cmdBurn(env),
   dieta: async (env) => void (await say(env, HELP)),
   dzis: (env, arg) => cmdToday(env, arg),
   usun: (env, arg) => cmdDelete(env, arg),
@@ -570,6 +599,22 @@ export async function routeDietMessage(env: Env, msg: any, isEdit: boolean, ctx:
   }
   if (!text) return false;
 
+  // Kilka komend w jednej wiadomości (każda w osobnej linii): wykonaj znane komendy dietetyka po kolei, nieznane pomiń.
+  const lines = text.split("\n").map((l) => l.trim()).filter(Boolean);
+  if (lines.length > 1 && lines.every((l) => /^\/[a-zA-Z]+/.test(l))) {
+    const known = lines
+      .map((l) => /^\/([a-zA-Z]+)(?:@\w+)?(?:\s+([\s\S]*))?$/.exec(l))
+      .filter((m): m is RegExpExecArray => Boolean(m && COMMANDS[m[1].toLowerCase()]));
+    if (known.length) {
+      if (isEdit) return true;
+      ctx.waitUntil(
+        (async () => {
+          for (const m of known) await guard(env, `Komenda /${m[1]}`, () => COMMANDS[m[1].toLowerCase()](env, m[2] ?? "", msg));
+        })(),
+      );
+      return true;
+    }
+  }
   const cmd = /^\/([a-zA-Z]+)(?:@\w+)?(?:\s+([\s\S]*))?$/.exec(text);
   if (cmd) {
     const fn = COMMANDS[cmd[1].toLowerCase()];
@@ -761,7 +806,7 @@ export async function nutritionReport(env: Env, days: number) {
     teraz: { data: today, godzina: local.time },
     typ_dnia: { typ: DAY_TYPE_PL[info.dayType], powod: info.dayTypeWhy },
     cele_dzis: info.targets
-      ? { kcal: info.targets.kcal, bialko_g: info.targets.protein, weglowodany_g: info.targets.carbs, tluszcz_g: info.targets.fat, zrodlo_kcal: info.targets.source === "g/kg" ? "g/kg masy ciała (brak danych o spalaniu)" : info.targets.source === "garmin" ? `średnie spalanie z Garmina 14 dni (aktywne ×0,85): ${info.base?.kcal} kcal/dzień` : `kalibracja z wagi i spożycia: ${info.base?.kcal} kcal/dzień`, uwaga: info.targets.note }
+      ? { kcal: info.targets.kcal, bialko_g: info.targets.protein, weglowodany_g: info.targets.carbs, tluszcz_g: info.targets.fat, zrodlo_kcal: info.targets.source === "g/kg" ? "g/kg masy ciała (brak danych o spalaniu)" : info.targets.source === "garmin" ? `mediana spalania z Garmina z 14 dni (aktywne ×0,85): ${info.base?.kcal} kcal/dzień` : `kalibracja z wagi i spożycia: ${info.base?.kcal} kcal/dzień`, uwaga: info.targets.note }
       : "brak (Jan nie podał wagi: /waga)",
     spozycie_dzis: {
       ...tot,

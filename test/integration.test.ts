@@ -23,6 +23,7 @@ const sent: any[] = [];
 const calls: string[] = [];
 const geminiQueue: any[] = [];
 let msgId = 100;
+const garminDays: any[] = [];
 const geminiBodies: any[] = [];
 globalThis.fetch = (async (url: any, init?: any) => {
   const u = String(url);
@@ -41,6 +42,18 @@ globalThis.fetch = (async (url: any, init?: any) => {
     const next = geminiQueue.shift();
     if (!next) throw new Error("unexpected gemini call");
     return new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: JSON.stringify(next) }] } }] }));
+  }
+  if (u.includes("personal.connectapi.garmin.com")) {
+    if (u.includes("/token")) {
+      const b64 = (o: any) => btoa(JSON.stringify(o)).replace(/=+$/, "");
+      return new Response(`${b64({ alg: "none" })}.${b64({ exp: 4102444800 })}.sig`);
+    }
+    if (u.includes("dailysummaries")) {
+      const q = new URL(u).searchParams;
+      const data = garminDays.filter((d) => d.calendarDate >= q.get("startDate")! && d.calendarDate <= q.get("endDate")!);
+      return new Response(JSON.stringify({ data }));
+    }
+    return new Response("{}");
   }
   if (u.includes("intervals.icu")) return new Response("[]");
   throw new Error(`unexpected fetch ${u}`);
@@ -266,5 +279,45 @@ test("model/user text with <, > and & cannot break the HTML message", async () =
   assert.ok(t.includes("Czy sos &gt; 20 g &amp; ostry?"));
   assert.ok(!/<b>x<\/b>|<i> &/.test(t));
   assert.match(t, /\(\?\)/); // niska pewność oznaczona
+  mock.timers.reset();
+});
+
+test("Garmin energy base is a median (outlier day ignored), /spalanie shows days, /cel shows components", async () => {
+  mock.timers.reset(); mock.timers.enable({ apis: ["Date"], now: new Date("2026-11-18T10:00:00Z") });
+  env.GARMIN_PERSONAL_API_KEY = "gk";
+  garminDays.length = 0;
+  for (let i = 1; i <= 14; i++) {
+    const date = new Date(Date.parse("2026-11-18T12:00:00Z") - i * 86400000).toISOString().slice(0, 10);
+    const active = i === 3 ? 20000 : 500; // jeden dzień z absurdalną wartością
+    garminDays.push({ calendarDate: date, calories: { burnedResting: 2500, burnedActive: active, burnedTotal: 2500 + active } });
+  }
+  await send({ message: { chat, date: now(), text: "/cel" } });
+  const cel = lastText();
+  assert.match(cel, /mediany spalania z Garmina/);
+  assert.match(cel, new RegExp(`ok\\. ${Math.round(2500 + 0.85 * 500)} kcal`)); // 2925, a średnia byłaby ~4000
+  assert.match(cel, /14 dni: spoczynkowe 2500 \+ aktywne 500/);
+  await send({ message: { chat, date: now(), text: "/spalanie" } });
+  const burn = lastText();
+  assert.equal(sent[sent.length - 1].parse_mode, "HTML");
+  assert.match(burn, /11-15: <b>22500<\/b> = 2500 \+ 20000/);
+  assert.match(burn, /Baza do celów \(mediana, aktywne ×0,85\): <b>2925<\/b> kcal/);
+  env.GARMIN_PERSONAL_API_KEY = undefined;
+  mock.timers.reset();
+});
+
+test("several commands in one message run in order; mixed text is not treated as commands", async () => {
+  mock.timers.reset(); mock.timers.enable({ apis: ["Date"], now: new Date("2026-11-18T10:30:00Z") });
+  await send({ message: { chat, date: now(), text: "/waga 106\n/dzis" } });
+  const weights = await state.getWeights();
+  assert.equal(weights[weights.length - 1].kg, 106);
+  assert.match(lastText(), /^📅 <b>środa, 2026-11-18<\/b>/); // /dzis wykonane po /waga
+  // nieznana komenda w grupie jest pomijana, znane się wykonują
+  await send({ message: { chat, date: now(), text: "/waga 105\n/cosnieznanego" } });
+  const w2 = await state.getWeights();
+  assert.equal(w2[w2.length - 1].kg, 105);
+  // sama nieznana komenda (np. /start) nadal idzie po staremu do trenera/ignorowania, nie do dietetyka
+  const before = (await state.getMemory()).conversation.length;
+  await send({ message: { chat, date: now(), text: "/start" } });
+  assert.equal((await state.getMemory()).conversation.length, before);
   mock.timers.reset();
 });

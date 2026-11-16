@@ -331,6 +331,8 @@ export interface Targets extends Macros {
 export interface EnergyBase {
   kcal: number; // dzienne zapotrzebowanie "przeciętnego" dnia
   source: Exclude<TargetSource, "g/kg">;
+  /** Tylko dla źródła "garmin": z czego policzono (mediany dzienne), do wglądu w /cel i /spalanie. */
+  detail?: { days: number; resting: number; active: number; min: number; max: number };
 }
 
 /** Zapotrzebowanie danego typu dnia względem średniej z tygodnia z ok. 3 biegami (dzień bez biegu poniżej, długi bieg wyraźnie powyżej). */
