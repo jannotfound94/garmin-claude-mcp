@@ -681,8 +681,9 @@ const defaultHandler = {
           headers: { "content-type": "application/gpx+xml", "content-disposition": `attachment; filename="trasa-${o.label}.gpx"` },
         });
       }
-      const title = `${name}: ${o.unpaved_pct}% nieutwardzonej, zieleń ${o.green_avg}/10, ${o.retrace_pct}% dwa razy${o.via ? `, przez ${o.via.join(", ")}` : ""}`;
-      return new Response(mapPage(esc(title), o.coords, `/trasa/${p.id}/${o.label}.gpx`), { headers: html });
+      const title = `${name.replace(/ (\d+(?:\.\d+)?) km$/, " · $1 km")}`;
+      const details = `${o.unpaved_pct}% nieutwardzonej, zieleń ${o.green_avg}/10, ${o.retrace_pct}% dwa razy${o.via ? `, przez ${o.via.join(", ")}` : ""}`;
+      return new Response(mapPage(esc(title), o.coords, `/trasa/${p.id}/${o.label}.gpx`, esc(details)), { headers: html });
     }
     if (url.pathname === "/setup") return handleSetup(request, env, url.origin);
     if (url.pathname !== "/authorize") return new Response("Not found", { status: 404 });
