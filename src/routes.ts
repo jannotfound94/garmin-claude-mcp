@@ -111,18 +111,36 @@ function overlap(a: [number, number][], b: [number, number][]) {
   return n ? hit / n : 0;
 }
 
-export async function proposeLoops(apiKey: string, start: LatLon, targetKm: number, tries = 8): Promise<RouteOption[]> {
-  const meters = Math.round(targetKm * 1000);
+/**
+ * OpenRouteService treats the round-trip length only as a preference, so a loop for "5 km" can come
+ * back as 6-8 km. For each seed the requested length is rescaled by target/actual and re-requested
+ * (up to 2 corrections), keeping the closest result.
+ */
+async function calibratedLoop(apiKey: string, start: LatLon, targetKm: number, seed: number) {
+  let request = targetKm * 1000;
+  let best = await loop(apiKey, start, Math.round(request), seed);
+  for (let i = 0; i < 2; i++) {
+    const err = best.distance_km / targetKm - 1;
+    if (Math.abs(err) <= 0.05 || best.distance_km <= 0) break;
+    request = request * (targetKm / best.distance_km);
+    const next = await loop(apiKey, start, Math.round(request), seed).catch(() => null);
+    if (next && Math.abs(next.distance_km - targetKm) < Math.abs(best.distance_km - targetKm)) best = next;
+  }
+  return best;
+}
+
+export async function proposeLoops(apiKey: string, start: LatLon, targetKm: number, tries = 6): Promise<RouteOption[]> {
   const seeds = Array.from({ length: tries }, (_, i) => Math.floor(Math.random() * 1000) + i * 1000);
-  const settled = await Promise.allSettled(seeds.map((s) => loop(apiKey, start, meters, s)));
+  const settled = await Promise.allSettled(seeds.map((s) => calibratedLoop(apiKey, start, targetKm, s)));
   const ok = settled.filter((r): r is PromiseFulfilledResult<Awaited<ReturnType<typeof loop>>> => r.status === "fulfilled").map((r) => r.value);
   if (!ok.length) {
     const err = settled.find((r) => r.status === "rejected") as PromiseRejectedResult | undefined;
     throw new Error(String(err?.reason ?? "Nie udało się wyznaczyć tras"));
   }
-  // Prefer loops within 15% of the target length.
-  const near = ok.filter((o) => Math.abs(o.distance_km - targetKm) <= targetKm * 0.15);
-  const pool = (near.length >= 2 ? near : ok).sort((a, b) => score(b) - score(a));
+  const off = (o: { distance_km: number }) => Math.abs(o.distance_km - targetKm) / targetKm;
+  // Only loops within 10% of the target; if fewer than two qualify, take the closest ones by length.
+  const near = ok.filter((o) => off(o) <= 0.1);
+  const pool = near.length >= 2 ? near.sort((a, b) => score(b) - score(a)) : [...ok].sort((a, b) => off(a) - off(b));
   const picked = [pool[0]];
   const second = pool.slice(1).find((o) => overlap(o.coords, pool[0].coords) < 0.6) ?? pool[1];
   if (second) picked.push(second);
