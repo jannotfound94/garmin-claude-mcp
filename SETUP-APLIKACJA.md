@@ -63,6 +63,10 @@ Lokalizacja: przycisk **„Użyj mojej lokalizacji”** (zakładka Plan lub ta s
 
 Jeśli powiadomienia nie przychodzą: sprawdź zgodę (ikona kłódki przy adresie → Powiadomienia), oszczędzanie baterii dla Chrome oraz czy kanał nie jest ustawiony na „Tylko Telegram”.
 
+### Wersja APK: lokalizacja i przycisk „wstecz”
+
+APK od wersji z tą poprawką prosi o zgodę na lokalizację (przy pierwszym „Użyj mojej lokalizacji”). Jeśli wcześniej odmówiłeś, włącz ją w Ustawienia telefonu → Aplikacje → Garda → Uprawnienia → Lokalizacja. Przycisk „wstecz” cofa po ekranach aplikacji i mapie trasy, a na ekranie startowym chowa aplikację. Pobrany plik GPX otwiera się w przeglądarce telefonu. Nowe APK instaluje się nad starym (ten sam podpis), bez odinstalowywania.
+
 ## Jak korzystać
 
 - **Dodaj posiłek:** pomarańczowy przycisk ＋ na dole (działa na każdym ekranie). Zdjęcie z aparatu lub z galerii, opis tekstem, godzina (gdy dopisujesz coś z wcześniej). Jeśli Gemini jest chwilowo przeciążony, aplikacja sama ponowi próbę kilka razy.

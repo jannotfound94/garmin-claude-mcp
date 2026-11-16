@@ -57,7 +57,7 @@ export function shareLocation() {
     if (!navigator.geolocation) return reject(new Error("Ta przeglądarka nie udostępnia lokalizacji."));
     navigator.geolocation.getCurrentPosition(
       (p) => api("/location", { method: "POST", body: { lat: p.coords.latitude, lon: p.coords.longitude } }).then(resolve, reject),
-      (e) => reject(new Error(e.code === 1 ? "Brak zgody na lokalizację. Włącz ją w ustawieniach witryny." : "Nie udało się ustalić lokalizacji. Spróbuj na zewnątrz.")),
+      (e) => reject(new Error(e.code === 1 ? "Brak zgody na lokalizację. Włącz ją w ustawieniach telefonu (Aplikacje → Garda → Uprawnienia → Lokalizacja) albo, w przeglądarce, w ustawieniach witryny." : "Nie udało się ustalić lokalizacji. Spróbuj na zewnątrz.")),
       { enableHighAccuracy: true, timeout: 15000, maximumAge: 60000 },
     );
   });
