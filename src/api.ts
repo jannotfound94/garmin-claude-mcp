@@ -12,6 +12,7 @@ import {
   dateOfMealId,
   goalProgress,
   type NotifyChannel,
+  isMealKind,
   hhmmToMin,
   parseSlots,
   sumMacros,
@@ -207,6 +208,8 @@ export async function handleApi(request: Request, env: Env): Promise<Response> {
       if (img && (!IMAGE_MIMES.has(String(img.mime)) || typeof img.data !== "string" || img.data.length < 100 || img.data.length > 7_000_000)) {
         throw new HttpError(400, "bad_image", "Zdjęcie musi być w formacie JPEG, PNG lub WebP i mieć do ok. 5 MB.");
       }
+      if (b.kind != null && b.kind !== "" && !isMealKind(b.kind)) throw new HttpError(400, "bad_kind", "Nieznany rodzaj posiłku.");
+      const kind = isMealKind(b.kind) ? b.kind : undefined;
       const unix = mealUnix(b);
       const nowLocal = warsaw(new Date(unix * 1000));
       let a;
@@ -222,7 +225,7 @@ export async function handleApi(request: Request, env: Env): Promise<Response> {
         mapGeminiError(e);
       }
       if (!a.isFood) throw new HttpError(422, "no_food", "Nie widzę tu jedzenia ani picia. Dopisz opis, jeśli to jednak posiłek.");
-      const r = await buildAndSaveMeal(env, a, { source: img ? "photo" : "text", note: text, msgUnix: unix });
+      const r = await buildAndSaveMeal(env, a, { source: img ? "photo" : "text", note: text, msgUnix: unix, ...(kind ? { kind } : {}) });
       return json({ meal: r.meal, slotName: r.slotName, extra: r.extra, overview: await dayOverview(env, r.meal.date) }, 201);
     }
     const mealRoute = /^\/api\/meals\/([0-9]{8}\.[0-9a-f]{6})(?:\/(revise|favorite))?$/.exec(path);

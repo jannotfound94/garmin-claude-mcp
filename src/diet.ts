@@ -26,6 +26,8 @@ import {
   fmtMacros,
   hhmmToMin,
   isLoggedDay,
+  MEAL_KINDS,
+  type MealKind,
   labelForTime,
   newMealId,
   overallConfidence,
@@ -209,6 +211,7 @@ export async function dayOverview(env: Env, date: string) {
       time: m.time,
       label: m.label,
       slot: m.slot ?? null,
+      kind: m.kind ?? null,
       source: m.source,
       confidence: m.confidence,
       note: m.note,
@@ -292,6 +295,7 @@ export async function slotNamesFor(env: Env, date: string): Promise<string[]> {
 }
 
 export interface MealCtx {
+  kind?: MealKind;
   source: Meal["source"];
   note: string;
   photoFileId?: string;
@@ -305,7 +309,12 @@ export async function buildAndSaveMeal(env: Env, a: Awaited<ReturnType<typeof an
   const time = a.eatenTime ?? at.time;
   const { items, used } = await applyBarcode(a.items, a.barcode);
   const cfg = await st.getNutCfg();
-  const slotName = a.slot ?? labelForTime(slotsFor(cfg, weekdayOf(date)), time, cfg.remindAfterMin);
+  // Rodzaj wybrany w aplikacji ma pierwszeństwo przed domysłem z godziny i z opisu. Śniadanie, obiad i kolacja zaliczają
+  // odpowiednie okno z planu (jeśli takie jest), przekąska i deser są dodatkami poza planem.
+  const planSlots = slotsFor(cfg, weekdayOf(date));
+  const kindSlot = c.kind ? planSlots.find((s) => slotKey(s.name) === c.kind)?.name ?? null : null;
+  const slot = c.kind ? kindSlot : a.slot;
+  const slotName = c.kind ? kindSlot ?? MEAL_KINDS[c.kind] : a.slot ?? labelForTime(planSlots, time, cfg.remindAfterMin);
   const meal: Meal = {
     id: newMealId(date),
     date,
@@ -317,7 +326,8 @@ export async function buildAndSaveMeal(env: Env, a: Awaited<ReturnType<typeof an
     totals: sumMacros(items),
     confidence: overallConfidence(items),
     question: a.question,
-    ...(a.slot ? { slot: a.slot } : {}),
+    ...(slot ? { slot } : {}),
+    ...(c.kind ? { kind: c.kind } : {}),
     ...(c.photoFileId ? { photoFileId: c.photoFileId } : {}),
     createdAt: new Date().toISOString(),
   };

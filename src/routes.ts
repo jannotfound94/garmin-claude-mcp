@@ -435,7 +435,7 @@ export function mapPage(title: string, coords: number[][], gpxUrl: string, detai
 header{height:64px;display:flex;align-items:center;gap:10px;padding:0 12px;box-sizing:border-box;border-bottom:1px solid #ddd}
 header .t{flex:1;min-width:0}header b{display:block;font-size:16px}header small{display:block;color:#555;font-size:12px;line-height:1.25;max-height:2.5em;overflow:hidden}
 a.btn{background:#1a73e8;color:#fff;padding:8px 12px;border-radius:6px;text-decoration:none;white-space:nowrap;font-size:14px}a.back{background:#eef2f7;color:#1a2433}</style></head>
-<body><header><a class="btn back" href="/app/#/plan" onclick="if(history.length>1){history.back();return false}">← Wróć</a><div class="t"><b>${title}</b>${details ? `<small>${details}</small>` : ""}</div><a class="btn" href="${gpxUrl}">GPX</a></header><div id="map"></div>
+<body><header><a class="btn back" href="/app/#/plan" onclick="if(history.length>1){history.back();return false}">← Wróć</a><div class="t"><b>${title}</b>${details ? `<small>${details}</small>` : ""}</div><a class="btn" href="${gpxUrl}">Otwórz GPX</a></header><div id="map"></div>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
 <script>const p=${latlngs};const m=L.map('map');L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'&copy; OpenStreetMap'}).addTo(m);
 const l=L.polyline(p,{color:'#d32f2f',weight:5}).addTo(m);L.circleMarker(p[0],{radius:7,color:'#1a73e8'}).addTo(m).bindPopup('Start / meta');m.fitBounds(l.getBounds(),{padding:[20,20]});</script>
