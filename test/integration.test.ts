@@ -680,6 +680,8 @@ test("API summary: food, plan today/tomorrow, recovery, recommendations; sources
   assert.equal(b.marathon.goal, "poniżej 4:30:00");
   assert.equal(b.food.totals.kcal, 600);
   assert.equal(b.food.meals.length, 1);
+  assert.ok(Array.isArray(b.weight.series));
+  assert.ok(b.weight.series.length >= 1 && b.weight.plan.goalKg === 95, "seria wagi i plan do karty wagi");
   assert.equal(b.training.today.planned.length, 1);
   assert.equal(b.training.today.planned[0].km, 5);
   assert.equal(b.training.tomorrow.planned.length, 1, "NOTE jest pomijana");
@@ -690,10 +692,28 @@ test("API summary: food, plan today/tomorrow, recovery, recommendations; sources
   assert.ok(b.recommendations.some((x: any) => x.kind === "training" && /czeka/.test(x.title)), "dzisiejszy bieg jeszcze nie zrobiony");
   assert.ok(b.recommendations.length <= 7);
   assert.deepEqual(b.errors, []);
+  // dane do kart: tydzień z planem, km z 14 dni, seria zapisów
+  assert.equal(b.training.week.length, 7);
+  assert.equal(b.training.week[0].date, "2026-12-07"); // poniedziałek tygodnia z piątku 2026-12-11
+  assert.equal(b.training.week[4].isToday, true);
+  assert.equal(b.training.week[4].planned, true);
+  assert.equal(b.training.week[5].plannedKm, 18);
+  assert.equal(b.training.weekPlannedKm, 23); // 5 km w piątek + 18 km w sobotę
+  assert.equal(b.training.weekKm, 0);
+  assert.equal(b.training.activityDays.length, 14);
+  assert.equal(b.training.activityDays[13].date, "2026-12-11");
+  assert.equal(typeof b.logging.streak, "number");
+  assert.equal(b.logging.last7.length, 7);
+  assert.equal(b.logging.last7[6].isToday, true);
+  assert.equal(b.logging.last7[6].weekday, "Pt");
   // bieg zrobiony dzisiaj: rekomendacja po biegu, brak przypomnienia o zaległym biegu
   icuActs = [{ id: "i1", type: "Run", start_date_local: "2026-12-11T08:00:00", distance: 5100, moving_time: 1900, name: "Bieg" }];
   const r2 = await api("/api/summary");
   assert.equal(r2.body.training.today.done.length, 1);
+  assert.equal(r2.body.training.weekKm, 5.1);
+  assert.equal(r2.body.training.activityDays[13].km, 5.1);
+  assert.equal(r2.body.training.last14Km, 5.1);
+  assert.equal(r2.body.training.week[4].doneKm, 5.1);
   assert.ok(r2.body.recommendations.some((x: any) => x.title === "Po biegu"));
   assert.ok(!r2.body.recommendations.some((x: any) => /czeka/.test(x.title)));
   // awaria intervals.icu nie wywala całego podsumowania

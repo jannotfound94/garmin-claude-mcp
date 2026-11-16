@@ -175,7 +175,7 @@ export function recommend(i: RecInput): Rec[] {
   // ---------- waga ----------
   const w = i.weight;
   if (w.daysSinceWeighIn === null) {
-    add({ kind: "weight", icon: "⚖️", title: "Podaj wagę", priority: 2, text: "Nie mam jeszcze żadnej wagi, a bez niej cele i plan nie mają sensu. Wejdź w zakładkę Postęp i wpisz, ile ważysz." });
+    add({ kind: "weight", icon: "⚖️", title: "Podaj wagę", priority: 2, text: "Nie mam jeszcze żadnej wagi, a bez niej cele i plan nie mają sensu. Wejdź w Ty → Postęp i wpisz, ile ważysz." });
   } else if (w.daysSinceWeighIn > 10) {
     add({ kind: "weight", icon: "⚖️", title: "Czas na ważenie", priority: 3, text: `Ostatnie ważenie było ${w.daysSinceWeighIn} dni temu. Raz w tygodniu, rano, w podobnych warunkach i będziemy wiedzieć, czy to działa.` });
   } else if (w.aheadKg !== null && w.aheadKg < -1.5) {
