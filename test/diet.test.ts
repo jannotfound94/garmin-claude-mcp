@@ -4,7 +4,7 @@ import {
   DEFAULT_CONFIG, classifyDay, computeTargets, estimateTdee, evaluateReminders, labelForTime, normalizeItem,
   overallConfidence, parseSlots, satisfiedSlots, slotKey, slotsFor, sumMacros, weightSlopePerDay, weightStats, dateOfMealId, newMealId,
 } from "../src/nutrition";
-import { parseAnalysis, applyBarcode } from "../src/gemini";
+import { parseAnalysis, applyBarcode, analyzeMeal } from "../src/gemini";
 
 const S = (t: string): any => (parseSlots(t) as any).slots;
 const cfg = { ...DEFAULT_CONFIG, slots: S("śniadanie 07:30; obiad 13:30; kolacja 19:30") };
@@ -153,4 +153,39 @@ test("applyBarcode only for single-item meals", async () => {
   assert.equal(r.used, "Skyr");
   assert.equal(r.items[0].basis, "label");
   assert.ok(Math.abs(r.items[0].protein - 16.5) < 0.01);
+});
+
+const okBody = { candidates: [{ content: { parts: [{ text: JSON.stringify({ is_food: true, meal_label: "Jajka", items: [{ name: "jajka", grams: 100, kcal: 150, protein_g: 13, carbs_g: 1, fat_g: 10, confidence: "medium", basis: "estimate" }] }) }] } }] };
+const input = { note: "jajka", nowLocal: { date: "2026-11-16", time: "08:00" } };
+const withFetch = async (fn: (url: string, body: any) => Response, run: () => Promise<void>) => {
+  const orig = globalThis.fetch;
+  const seen: { model: string; thinking: any }[] = [];
+  globalThis.fetch = (async (url: any, init: any) => {
+    const body = JSON.parse(init.body);
+    seen.push({ model: String(url).split("/models/")[1].split(":")[0], thinking: body.generationConfig.thinkingConfig });
+    return fn(String(url), body);
+  }) as any;
+  try { await run(); } finally { globalThis.fetch = orig; }
+  return seen;
+};
+
+test("analyzeMeal: model rejecting thinkingLevel is retried with thinkingBudget, then without", async () => {
+  let n = 0;
+  const seen = await withFetch(() => (++n < 3 ? new Response("thinking_level is not supported", { status: 400 }) : new Response(JSON.stringify(okBody))), async () => {
+    const a = await analyzeMeal({ GEMINI_API_KEY: "k" } as any, input);
+    assert.equal(a.model, "gemini-3.5-flash");
+  });
+  assert.deepEqual(seen.map((s) => s.thinking), [{ thinkingLevel: "low" }, { thinkingBudget: 1024 }, undefined]);
+  assert.ok(seen.every((s) => s.model === "gemini-3.5-flash"));
+});
+
+test("analyzeMeal: 404 on primary falls back to the second model; both failing reports both errors", async () => {
+  const seen = await withFetch((u) => (u.includes("gemini-3.5-flash:") ? new Response("no longer available", { status: 404 }) : new Response(JSON.stringify(okBody))), async () => {
+    assert.equal((await analyzeMeal({ GEMINI_API_KEY: "k" } as any, input)).model, "gemini-3.5-flash-lite");
+  });
+  assert.deepEqual(seen.map((s) => s.model), ["gemini-3.5-flash", "gemini-3.5-flash-lite"]);
+  await withFetch((u) => new Response(u.includes("lite") ? "lite gone" : "flash gone", { status: u.includes("lite") ? 404 : 429 }), async () => {
+    await assert.rejects(analyzeMeal({ GEMINI_API_KEY: "k", GEMINI_MODEL: "a-flash", GEMINI_FALLBACK_MODEL: "b-lite" } as any, input), (e: Error) => /a-flash 429.*b-lite 404/.test(e.message));
+  });
+  await assert.rejects(analyzeMeal({} as any, input), /GEMINI_API_KEY/);
 });
