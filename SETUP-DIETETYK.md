@@ -94,6 +94,8 @@ Przy kalibracji z wagi (poniżej) zapotrzebowanie jest mnożone przez współczy
 
 ## Rozwiązywanie problemów
 
+- **„Gemini jest chwilowo przeciążony” (⏳):** to normalne, gdy Gemini ma duże obciążenie (błąd 503) albo nie odpowiada na czas. Bot sam ponawia zadanie w tle po 1, 2,5 i 6,5 minuty i zapisze posiłek, gdy Gemini wróci, **bez Twojego udziału i bez ponownego wysyłania**. Jeśli po czterech próbach nadal nie działa, dostaniesz jedną wiadomość z prośbą, żeby spróbować za kilka minut albo wpisać posiłek tekstem.
+
 - **Bot milczy po zdjęciu**: sprawdź na `/setup`, czy Gemini działa. Błąd 429 = limit darmowego poziomu (poczekaj lub włącz rozliczanie); 404 = nazwa modelu jest nieaktualna, wpisz nową w `GEMINI_MODEL`.
 - **Przyciski nic nie robią**: kliknij ponownie „Podłącz Telegram” na `/setup` (Krok 3.3).
 - **Brak celów**: wpisz `/waga`.

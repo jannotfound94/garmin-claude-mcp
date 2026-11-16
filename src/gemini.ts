@@ -5,9 +5,9 @@
 import { type FoodItem, normalizeItem, normHhmm, slotKey, validHhmm } from "./nutrition";
 
 const API = "https://generativelanguage.googleapis.com/v1beta/models";
-const BUDGET_MS = 22_000;
+const BUDGET_MS = 26_000; // praca w tle po odpowiedzi do Telegrama ma w Cloudflare ok. 30 s
 const MIN_ATTEMPT_MS = 4_000;
-const ATTEMPT_CAP_MS = 12_000; // pojedyncza próba niebędąca ostatnią: zostaw czas na model zapasowy
+const ATTEMPT_CAP_MS = 15_000; // pojedyncza próba niebędąca ostatnią: zostaw czas na model zapasowy
 export const DEFAULT_MODEL = "gemini-3.5-flash";
 export const DEFAULT_FALLBACK_MODEL = "gemini-3.5-flash-lite";
 
@@ -33,6 +33,9 @@ export interface AnalyzeInput {
   nowLocal: { date: string; time: string };
   /** Nazwy posiłków z planu Jana (np. śniadanie, obiad); model może wskazać jedną, gdy Jan sam to napisze. */
   slotNames?: string[];
+  /** Budżet czasu na wszystkie próby i limit pojedynczej próby (ms). Zadania ponawiane w tle mogą mieć więcej niż domyślne ok. 26 s. */
+  budgetMs?: number;
+  attemptCapMs?: number;
 }
 
 const SYSTEM = `Jesteś dietetykiem sportowym, który liczy kalorie i makroskładniki posiłków biegacza (kuchnia polska, typowe polskie porcje i produkty).
@@ -136,6 +139,12 @@ function buildBody(input: AnalyzeInput, thinking: Record<string, unknown> | null
   };
 }
 
+/**
+ * Chwilowa awaria po stronie Gemini (przeciążenie 503, limit 429, timeout, ucięty JSON): warto spróbować ponownie za moment.
+ * Błędy trwałe (zły klucz, zła nazwa modelu, zablokowana treść) są zwykłym Error.
+ */
+export class GeminiTransientError extends Error {}
+
 class GeminiHttpError extends Error {
   constructor(
     readonly status: number,
@@ -206,34 +215,44 @@ export function parseAnalysis(resp: any, model: string, slotNames: string[] = []
   };
 }
 
+function isTransient(e: unknown): boolean {
+  if (e instanceof GeminiHttpError) return e.status === 0 || e.status === 429 || e.status >= 500;
+  return e instanceof Error && /niepoprawny JSON/.test(e.message);
+}
+
 export async function analyzeMeal(env: Env, input: AnalyzeInput): Promise<MealAnalysis> {
   if (!env.GEMINI_API_KEY) throw new Error("Brak GEMINI_API_KEY");
   const models = [env.GEMINI_MODEL || DEFAULT_MODEL, env.GEMINI_FALLBACK_MODEL || DEFAULT_FALLBACK_MODEL].filter((m, i, a) => a.indexOf(m) === i);
   const errors: Record<string, string> = {};
-  const fail = () => new Error(Object.values(errors).join(" | ").slice(0, 700) || "Gemini: przekroczony limit czasu");
-  // Praca w tle po odpowiedzi do Telegrama (waitUntil) ma w Cloudflare ok. 30 s. Wspólny budżet czasu dla wszystkich
-  // prób gwarantuje, że błąd zdąży dojść do Jana zamiast zostać ucięty razem z procesem.
-  const deadline = Date.now() + BUDGET_MS;
+  let permanent = false; // przynajmniej jeden błąd był trwały, więc ponawianie nie ma sensu
+  const fail = () => {
+    const msg = Object.values(errors).join(" | ").slice(0, 700) || "Gemini: przekroczony limit czasu";
+    return permanent ? new Error(msg) : new GeminiTransientError(msg);
+  };
+  // Pierwsza próba idzie w tle po odpowiedzi do Telegrama (waitUntil, ok. 30 s w Cloudflare), więc wspólny budżet czasu dla
+  // wszystkich prób gwarantuje, że wynik lub błąd zdąży dojść do Jana. Zadania ponawiane w tle dostają większy budżet.
+  const deadline = Date.now() + (input.budgetMs ?? BUDGET_MS);
+  const cap = input.attemptCapMs ?? ATTEMPT_CAP_MS;
   for (const [mi, model] of models.entries()) {
     const isLast = mi === models.length - 1;
+    let stopped = false; // pętla wariantów przerwana innym błędem niż 400 przy ustawieniu myślenia
     for (const thinking of THINKING_VARIANTS) {
       const left = deadline - Date.now();
       if (left < MIN_ATTEMPT_MS) throw fail();
       try {
-        const resp = await callModel(env.GEMINI_API_KEY, model, buildBody(input, thinking), isLast ? left : Math.min(left, ATTEMPT_CAP_MS));
+        const resp = await callModel(env.GEMINI_API_KEY, model, buildBody(input, thinking), isLast ? left : Math.min(left, cap));
         return parseAnalysis(resp, model, input.slotNames);
       } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e);
-        // 400 przy ustawieniu myślenia = model go zwykle nie obsługuje: ten sam model, następny wariant
-        // (prawdziwie zły request padnie we wszystkich wariantach, to tylko kilka szybkich prób).
-        if (thinking && e instanceof GeminiHttpError && e.status === 400) {
-          errors[model] = msg.slice(0, 300);
-          continue;
-        }
-        errors[model] = msg.slice(0, 300);
+        errors[model] = (e instanceof Error ? e.message : String(e)).slice(0, 300);
+        // 400 przy ustawieniu myślenia = model go zwykle nie obsługuje: ten sam model, następny wariant.
+        if (thinking && e instanceof GeminiHttpError && e.status === 400) continue;
+        if (!isTransient(e)) permanent = true;
+        stopped = true;
         break; // limit (429), 5xx, 404 (nazwa modelu), pusty wynik: następny model
       }
     }
+    // Wszystkie warianty zwróciły 400: prawdziwie zły request, ponawianie nie pomoże.
+    if (!stopped) permanent = true;
   }
   throw fail();
 }

@@ -34,6 +34,17 @@ export interface Meal {
   photoFileId?: string;
   createdAt: string; // ISO UTC
 }
+/** Zadanie rozpoznania posiłku ponawiane w tle, gdy Gemini jest chwilowo niedostępny. */
+export interface DietJob {
+  id: string;
+  kind: "photo" | "text" | "correct";
+  at: number; // unix (s) wiadomości, od której zaczęło się zadanie
+  text?: string; // opis, podpis pod zdjęciem albo poprawka
+  fileId?: string; // zdjęcie w Telegramie (pobierane przy każdej próbie)
+  mealId?: string; // przy poprawce
+  attempts: number; // ile razy już ponawiano
+  nextAt: number; // kiedy następna próba (ms)
+}
 export interface Slot {
   name: string;
   time: string; // HH:MM
