@@ -138,6 +138,12 @@ Klucz jest ważny rok. Po roku utwórz nowy w Garmin Connect i podmień wartoś�
 
 Gdy chcesz wystartować z innego miejsca, udostępnij trenerowi lokalizację w Telegramie (spinacz → Lokalizacja). Przez 3 godziny trasy będą startować stamtąd.
 
+## Krok 6c. Pogoda (nic do założenia, tylko punkt startu)
+
+Pogoda pochodzi z darmowego serwisu Open-Meteo (bez konta i bez klucza, do użytku niekomercyjnego, dane na licencji CC BY 4.0). Trener używa jej do proponowania przesunięcia treningu na lepszy dzień lub godzinę.
+1. Na stronie `/setup`, w sekcji **Trasy**, zapisz punkt startu (adres albo współrzędne, np. `52.2500, 21.0000`). Współrzędne działają bez klucza OpenRouteService.
+2. Kliknij **Sprawdź pogodę**. Powinieneś zobaczyć „Pogoda działa ✅” i prognozę na 3 dni.
+
 ## Krok 7. Wyłączenie starych zadań
 
 Gdy w kroku 5 wszystko zadziałało, napisz do Claude: „wyłącz stare zadania trenera”. Dotychczasowe 9 zadań („Trener: poranna motywacja…” itd.) zostanie wyłączonych, ale nie usuniętych. Po podłączeniu Telegrama do serwera stare zadania i tak nie odczytają już Twoich wiadomości.

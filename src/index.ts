@@ -6,6 +6,7 @@ import TRENER from "../coach/TRENER.md";
 import { Icu, compactActivity, compactEvent, compactIntervals, compactWellness, computeSplits } from "./icu";
 import { GarminPersonal, capJson } from "./garmin";
 import { runScheduler } from "./scheduler";
+import { fetchForecast } from "./weather";
 import { geocode, mapPage, proposeLoops, toGpx } from "./routes";
 import { coach, handleTelegramWebhook, sendTelegram, sendTelegramFile, tg, webhookSecret } from "./telegram";
 import { addDays, daysBetween, fmtWarsaw, warsaw, warsawToUtc } from "./time";
@@ -19,6 +20,14 @@ function garminClient(env: Env): GarminPersonal | null {
   const state = coach(env);
   return new GarminPersonal(env.GARMIN_PERSONAL_API_KEY, () => state.getGarminToken(), (t) => state.setGarminToken(t));
 }
+
+/** Weather is judged for home (or the last shared location when there is no home). */
+async function weatherLocation(env: Env) {
+  const { home, last } = await coach(env).getRouteSettings();
+  return home ?? last ?? null;
+}
+
+const NO_LOCATION = "Pogoda niedostępna: brak punktu startu (adres lub współrzędne na stronie /setup albo udostępniona lokalizacja).";
 
 const NO_GARMIN = "Garmin Connect nie jest podłączony (brak sekretu GARMIN_PERSONAL_API_KEY).";
 
@@ -177,6 +186,19 @@ export class MyMCP extends McpAgent<Env> {
       },
     );
 
+    // ---------------- weather ----------------
+
+    this.server.tool(
+      "getWeather",
+      "Weather forecast for running (Open-Meteo), per day and time window (poranek 6-9, poludnie 11-14, wieczor 16-19): best start hour, verdict dobra/znosna/zla with reasons, temperature, feels-like, rain, wind, gusts, darkness, plus sunrise/sunset. For home. Use it to propose moving a run to a better day or time.",
+      { days: z.number().optional().describe("How many days including today, default 7, max 7") },
+      async ({ days = 7 }) => {
+        const loc = await weatherLocation(this.env);
+        if (!loc) return text(NO_LOCATION);
+        return text(await fetchForecast(loc.lat, loc.lon, days));
+      },
+    );
+
     // ---------------- running routes ----------------
 
     this.server.tool(
@@ -257,11 +279,14 @@ export class MyMCP extends McpAgent<Env> {
         const mem = await coach(this.env).getMemory();
         const icu = this.icu();
         const g = garminClient(this.env);
-        const [acts, events, well, garminToday] = await Promise.allSettled([
+        const [acts, events, well, garminToday, weather] = await Promise.allSettled([
           icu.activities(addDays(local.date, -14)),
           icu.events(addDays(local.date, -7), addDays(local.date, 14)),
-          icu.wellness(addDays(local.date, -7)),
-          g ? g.readiness(addDays(local.date, -6), local.date) : Promise.resolve(NO_GARMIN),
+          g ? Promise.resolve(null) : icu.wellness(addDays(local.date, -7)), // Garmin data supersedes it
+          g ? g.readiness(addDays(local.date, -3), local.date) : Promise.resolve(NO_GARMIN),
+          weatherLocation(this.env).then((loc): Promise<unknown> | string =>
+            loc ? fetchForecast(loc.lat, loc.lon, 4, ["poranek", "wieczor"]) : NO_LOCATION,
+          ),
         ]);
         const val = <T,>(r: PromiseSettledResult<T>, f: (x: T) => unknown) =>
           r.status === "fulfilled" ? f(r.value) : { error: String(r.reason) };
@@ -282,7 +307,7 @@ export class MyMCP extends McpAgent<Env> {
                 .map((x) => compactActivity(x)),
             ),
           },
-          rozmowa: mem.conversation.slice(-30).map((m) => ({
+          rozmowa: mem.conversation.slice(-16).map((m) => ({
             kiedy: fmtWarsaw(m.at),
             kto: m.from,
             tekst: m.text,
@@ -291,8 +316,9 @@ export class MyMCP extends McpAgent<Env> {
           dane: {
             biegi_14_dni: val(acts, (a: any[]) => a.map(compactActivity)),
             kalendarz_od_minus7_do_plus14: val(events, (e: any[]) => e.map(compactEvent)),
-            samopoczucie_7_dni: val(well, (w: any[]) => w.map(compactWellness)),
-            garmin_regeneracja_7_dni: val(garminToday, (x) => x),
+            ...(g ? {} : { samopoczucie_7_dni: val(well, (w: any) => (w as any[]).map(compactWellness)) }),
+            garmin_regeneracja_4_dni: val(garminToday, (x) => x),
+            pogoda_4_dni: val(weather, (x) => x),
           },
           telegram_skonfigurowany: Boolean(this.env.TELEGRAM_BOT_TOKEN && this.env.TELEGRAM_CHAT_ID),
           trasy: await (async () => {
@@ -433,8 +459,8 @@ async function routesSection(env: Env, password: string) {
   return `<h3>Trasy</h3>
   <ul><li>${env.ORS_API_KEY ? "✅" : "❌"} ORS_API_KEY (darmowy klucz z openrouteservice.org)</li>
   <li>${home ? `✅ Punkt startu (dom): ${esc(home.label)}` : "❌ Brak punktu startu (dom)"}</li></ul>
-  <form method="post">${hidden}<input name="home_address" placeholder="Adres startu, np. ulica 1, Warszawa" style="width:100%;padding:.5rem;margin-bottom:.5rem">
-  ${btn("set_home", "Zapisz punkt startu")} ${btn("routes_test", "Wygeneruj testowe trasy 5 km")}</form>`;
+  <form method="post">${hidden}<input name="home_address" placeholder="Adres lub współrzędne startu, np. 52.2500, 21.0000" style="width:100%;padding:.5rem;margin-bottom:.5rem">
+  ${btn("set_home", "Zapisz punkt startu")} ${btn("routes_test", "Wygeneruj testowe trasy 5 km")} ${btn("weather_test", "Sprawdź pogodę")}</form>`;
 }
 
 async function handleSetup(request: Request, env: Env, origin: string): Promise<Response> {
@@ -473,10 +499,26 @@ async function handleSetup(request: Request, env: Env, origin: string): Promise<
         notice = "Trener zostanie obudzony w ciągu kilku sekund. Odśwież za chwilę, by zobaczyć wynik.";
         break;
       case "set_home": {
-        if (!env.ORS_API_KEY) throw new Error("Najpierw dodaj sekret ORS_API_KEY.");
-        const h = await geocode(env.ORS_API_KEY, String(form.get("home_address") ?? ""));
+        const raw = String(form.get("home_address") ?? "").trim();
+        const ll = /^(-?\d{1,2}(?:\.\d+)?)\s*[,;]\s*(-?\d{1,3}(?:\.\d+)?)$/.exec(raw);
+        if (!ll && !env.ORS_API_KEY) throw new Error("Adres wymaga sekretu ORS_API_KEY. Bez niego wpisz współrzędne, np. 52.2500, 21.0000.");
+        const h = ll
+          ? { lat: Number(ll[1]), lon: Number(ll[2]), label: `współrzędne ${ll[1]}, ${ll[2]}` }
+          : await geocode(env.ORS_API_KEY!, raw);
         await coach(env).setHome(h);
         notice = `Punkt startu zapisany: ${h.label} (${h.lat.toFixed(5)}, ${h.lon.toFixed(5)}).`;
+        break;
+      }
+      case "weather_test": {
+        const { home, last } = await coach(env).getRouteSettings();
+        const loc = home ?? last;
+        if (!loc) throw new Error("Najpierw zapisz punkt startu.");
+        const days = await fetchForecast(loc.lat, loc.lon, 3);
+        notice =
+          "Pogoda działa ✅ " +
+          days
+            .map((d) => `${d.dzien} ${d.data}: ${d.temp_min_c}…${d.temp_max_c}°C, opady ${d.opady_dzien_mm} mm, bieg: ${d.ocena_dnia}`)
+            .join(" | ");
         break;
       }
       case "routes_test": {
