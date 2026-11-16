@@ -1,4 +1,4 @@
-name: Build APK (Janek Trener)
+name: Build APK (Garda)
 
 # Buduje aplikację na Androida (plik .apk) w chmurze GitHuba. Uruchamiasz ręcznie: zakładka Actions → "Build APK" → Run workflow.
 # Gotowy plik pojawia się w zakładce Releases (do pobrania na telefonie) oraz jako artefakt przebiegu.
@@ -89,13 +89,13 @@ jobs:
       - name: Name the file
         run: |
           set -euo pipefail
-          cp android/app/build/outputs/apk/debug/app-debug.apk "janek-trener-${{ github.run_number }}.apk"
-          ls -la janek-trener-*.apk
+          cp android/app/build/outputs/apk/debug/app-debug.apk "garda-${{ github.run_number }}.apk"
+          ls -la garda-*.apk
 
       - uses: actions/upload-artifact@v4
         with:
-          name: janek-trener-apk
-          path: android-app/janek-trener-*.apk
+          name: garda-apk
+          path: android-app/garda-*.apk
           retention-days: 30
 
       - name: Publish release
@@ -104,7 +104,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          gh release create "apk-${{ github.run_number }}" "janek-trener-${{ github.run_number }}.apk" \
+          gh release create "apk-${{ github.run_number }}" "garda-${{ github.run_number }}.apk" \
             --repo "${{ github.repository }}" \
-            --title "Janek Trener (APK) #${{ github.run_number }}" \
+            --title "Garda (APK) #${{ github.run_number }}" \
             --notes "Aplikacja na Androida. Pobierz plik .apk na telefonie i zainstaluj (zezwól przeglądarce na instalację z nieznanych źródeł). Aplikacja ładuje interfejs z Twojego serwera, więc zmiany w wyglądzie nie wymagają nowego APK."

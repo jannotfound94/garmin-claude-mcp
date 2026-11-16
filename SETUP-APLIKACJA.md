@@ -1,4 +1,4 @@
-# Aplikacja Janek Trener: uruchomienie krok po kroku
+# Aplikacja Garda: uruchomienie krok po kroku
 
 Aplikacja to druga „twarz” tego samego systemu co bot na Telegramie: ten sam serwer, te same dane, ta sama logika. Pokazuje podsumowanie dnia z rekomendacjami, tracker jedzenia (zdjęcie lub opis), plan treningowy z trasami, wykres wagi względem planu i rozmowę z trenerem. Ciemny motyw, wygląda i działa jak zwykła aplikacja.
 
@@ -6,13 +6,17 @@ Aplikacja to druga „twarz” tego samego systemu co bot na Telegramie: ten sam
 
 ## Co jest w środku
 
-| Zakładka | Co robi |
+Dolna nawigacja ma pięć pozycji: **Dziś**, **Jedzenie**, pomarańczowy przycisk **＋** (dodaj posiłek z dowolnego ekranu), **Plan** i **Ty**.
+
+| Miejsce | Co robi |
 | --- | --- |
-| **Dziś** | Powitanie, odliczanie do maratonu, **rekomendacje na dziś i jutro** (jedzenie, trening, pogoda, regeneracja, waga), kalorie i makro względem celu, spalanie z Garmina, trening dziś i jutro z pogodą, regeneracja (sen, bateria, HRV), waga względem planu |
-| **Jedzenie** | Dziennik: przeglądanie dni, dodawanie posiłku **opisem, zdjęciem lub obojgiem**, poprawianie, ulubione jednym stuknięciem, usuwanie |
-| **Plan** | Treningi z kalendarza (intervals.icu) na dwa tygodnie, pogoda do każdego, **propozycje tras** (dwie pętle przez parki i ścieżki, mapa i GPX), przycisk **„Poproś trenera o plan”** |
-| **Trener** | Rozmowa z trenerem (Claude), ta sama co na Telegramie. Odpowiedź przychodzi po kilku minutach |
-| **Postęp** | Wykres wagi z planem do celu, tydzień (zjedzone vs cel vs spalone), ustawienia (deficyt, korekta Garmina, waga docelowa, pory posiłków) |
+| **Dziś** | Dashboard z kart: **priorytet dnia** i wskazówki (jedzenie, trening, pogoda, regeneracja, waga), kalorie z pierścieniem i makro, **kilometry w tym tygodniu względem planu** z wykresem 14 dni, trening dziś i jutro z pogodą, **seria dni z zapisanym jedzeniem**, spalanie z Garmina, regeneracja (sen, bateria, HRV), waga względem planu, źródła danych |
+| **Jedzenie** | Pasek dni (14 dni wstecz), podsumowanie dnia, ulubione jednym stuknięciem, dodawanie posiłku **opisem, zdjęciem lub obojgiem**, poprawianie i usuwanie |
+| **＋** | Szybkie dodanie posiłku z dowolnego ekranu |
+| **Plan** | Treningi z kalendarza (intervals.icu) na dwa tygodnie, filtr (wszystkie / tylko biegi), pogoda do każdego, **propozycje tras** (dwie pętle przez parki i ścieżki, mapa i GPX), przycisk **„Poproś trenera o plan”** |
+| **Ty** | Profil z zakładkami: **Postęp** (pierścienie celów, wykres wagi z planem do celu, wykres tygodnia), **Aktywności** (ostatnie biegi z Garmina), **Trener** (rozmowa, ta sama co na Telegramie, odpowiedź po kilku minutach) i **Ustawienia** (deficyt, korekta Garmina, waga docelowa, pory posiłków) |
+
+Wygląd: ciemny motyw w kolorach **niebieskim i pomarańczowym** (pomarańcz to ruch i główna akcja, niebieski to jedzenie i dane), karty modułowe z dużymi liczbami i jeden spójny zestaw ikon. Inspiracją układu był ekran postępów ze Stravy, ale nic z niego nie jest kopiowane.
 
 Skąd co się bierze: kalorie i makro liczy serwer (zdjęcia rozpoznaje Gemini), plan treningowy układa trener (Claude) i zapisuje w intervals.icu, dane o regeneracji i spalaniu idą z Garmin Connect, pogoda z Open-Meteo.
 
@@ -36,9 +40,9 @@ APK budujemy w chmurze GitHuba, nie na Twoim komputerze. Jest to cienkie opakowa
 1. Na GitHubie w repozytorium: **Settings → Secrets and variables → Actions → zakładka Variables → New repository variable**:
    - nazwa: `APP_URL`
    - wartość: adres z kroku 1, z `https://` i końcówką `/app/`
-2. Zakładka **Actions → „Build APK (Janek Trener)” → Run workflow → Run workflow**.
+2. Zakładka **Actions → „Build APK (Garda)” → Run workflow → Run workflow**.
 3. Poczekaj ok. 10–15 minut (przy pierwszym uruchomieniu GitHub pobiera narzędzia Androida). Zielony znaczek = gotowe.
-4. Wejdź w zakładkę **Releases** (prawa strona strony głównej repozytorium) i na telefonie pobierz plik `janek-trener-….apk`.
+4. Wejdź w zakładkę **Releases** (prawa strona strony głównej repozytorium) i na telefonie pobierz plik `garda-….apk`.
 5. Otwórz pobrany plik. Android poprosi o zezwolenie przeglądarce na **instalację z nieznanych źródeł**: zezwól tylko dla tej instalacji. Google Play Protect może ostrzec, bo aplikacja nie jest ze sklepu: to normalne dla własnego APK.
 6. Uruchom aplikację i zaloguj się hasłem. Zdjęcia posiłków zrobisz aparatem w aplikacji (Android zapyta o zgodę na aparat).
 
@@ -48,11 +52,11 @@ APK budujemy w chmurze GitHuba, nie na Twoim komputerze. Jest to cienkie opakowa
 
 ## Jak korzystać
 
-- **Dodaj posiłek:** zakładka Jedzenie → ＋ (albo przycisk na ekranie Dziś). Zdjęcie z aparatu lub z galerii, opis tekstem, godzina (gdy dopisujesz coś z wcześniej). Jeśli Gemini jest chwilowo przeciążony, aplikacja sama ponowi próbę kilka razy.
+- **Dodaj posiłek:** pomarańczowy przycisk ＋ na dole (działa na każdym ekranie). Zdjęcie z aparatu lub z galerii, opis tekstem, godzina (gdy dopisujesz coś z wcześniej). Jeśli Gemini jest chwilowo przeciążony, aplikacja sama ponowi próbę kilka razy.
 - **Popraw posiłek:** „✏️ Popraw” pod posiłkiem i napisz, co zmienić („to było 200 g”, „bez sosu”).
-- **Plan:** zakładka Plan → „Poproś trenera o plan”. Trener układa plan wg zasad (cel maratonu poniżej 4:30, regeneracja, pogoda) i wpisuje go do kalendarza. Odpowiedź zobaczysz w zakładce Trener.
+- **Plan:** zakładka Plan → „Poproś trenera o plan”. Trener układa plan wg zasad (cel maratonu poniżej 4:30, regeneracja, pogoda) i wpisuje go do kalendarza. Odpowiedź zobaczysz w Ty → Trener.
 - **Trasy:** przy zaplanowanym biegu stuknij „Zaproponuj trasy”. Potrzebny jest klucz `ORS_API_KEY` i adres domowy ustawiony na stronie `/setup` (jak dla trasy na Telegramie).
-- **Waga:** zakładka Postęp → wpisz wagę (najlepiej raz w tygodniu, rano). Wykres pokazuje plan od pierwszego ważenia do wagi docelowej 95 kg w dniu maratonu.
+- **Waga:** Ty → Postęp → wpisz wagę (najlepiej raz w tygodniu, rano). Wykres pokazuje plan od pierwszego ważenia do wagi docelowej 95 kg w dniu maratonu.
 
 ## Bezpieczeństwo
 

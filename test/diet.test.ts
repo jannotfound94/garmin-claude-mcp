@@ -7,6 +7,7 @@ import {
 } from "../src/nutrition";
 import { parseAnalysis, applyBarcode, analyzeMeal, GeminiTransientError } from "../src/gemini";
 import { greeting, recommend, type RecInput } from "../src/recommend";
+import { loggingStreak, weekStart } from "../src/summary";
 
 const S = (t: string): any => (parseSlots(t) as any).slots;
 const cfg = { ...DEFAULT_CONFIG, slots: S("śniadanie 07:30; obiad 13:30; kolacja 19:30") };
@@ -482,4 +483,24 @@ test("recommend: recovery and weight", () => {
   assert.ok(recommend(baseInput({ weight: { ...baseInput().weight, daysSinceWeighIn: null } })).length <= 7);
   assert.match(greeting(8), /dzień dobry/);
   assert.match(greeting(20), /jak minął dzień/);
+});
+
+test("loggingStreak: today in progress does not break the streak; gaps do; minimum meals per day", () => {
+  const counts: Record<string, number> = { "2026-12-11": 1, "2026-12-10": 3, "2026-12-09": 2, "2026-12-08": 2, "2026-12-07": 0, "2026-12-06": 4 };
+  const f = (d: string) => counts[d] ?? 0;
+  assert.equal(loggingStreak(f, "2026-12-11"), 3, "dzisiaj tylko 1 posiłek: liczymy od wczoraj (10, 9, 8)");
+  assert.equal(loggingStreak(f, "2026-12-10"), 3);
+  counts["2026-12-11"] = 2;
+  assert.equal(loggingStreak(f, "2026-12-11"), 4, "dzisiaj kompletny dzień dolicza się do serii");
+  assert.equal(loggingStreak(f, "2026-12-07"), 1, "pusty dzisiaj nie przerywa: liczymy od wczoraj (12-06)");
+  assert.equal(loggingStreak((d) => (d === "2026-12-07" ? 0 : d === "2026-12-06" ? 0 : 3), "2026-12-07"), 0, "pusty dzisiaj i pusty wczoraj: seria przerwana");
+  assert.equal(loggingStreak(() => 5, "2026-12-11"), 365, "limit zabezpieczający");
+  assert.equal(loggingStreak(f, "2026-12-11", 1), 4);
+});
+
+test("weekStart returns the Monday of the week (Mon-Sun)", () => {
+  assert.equal(weekStart("2026-11-16"), "2026-11-16"); // poniedziałek
+  assert.equal(weekStart("2026-11-22"), "2026-11-16"); // niedziela
+  assert.equal(weekStart("2026-11-18"), "2026-11-16"); // środa
+  assert.equal(weekStart("2026-12-01"), "2026-11-30"); // wtorek, przełom miesięcy
 });

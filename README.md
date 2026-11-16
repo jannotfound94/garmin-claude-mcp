@@ -88,7 +88,7 @@ See [SETUP-TRENER.md](SETUP-TRENER.md) (Polish). The worker receives Telegram me
 
 ### App (PWA and Android APK)
 
-A dark mobile app on top of the same server: daily summary with recommendations, meal tracker (photo or text), training plan with weather and route proposals, weight chart against the plan to the goal date, coach chat. It is served as static files from `public/app` and talks to the Worker through `/api` (password login, signed token, lockout after 8 failed attempts). Install it from the browser, or build an APK in GitHub Actions (`android-app/`, Capacitor). See [SETUP-APLIKACJA.md](SETUP-APLIKACJA.md) (Polish).
+A dark mobile app (blue and orange, card-based dashboard, one custom icon set) on top of the same server: daily summary with recommendations, meal tracker (photo or text), training plan with weather and route proposals, weight chart against the plan to the goal date, coach chat. It is served as static files from `public/app` and talks to the Worker through `/api` (password login, signed token, lockout after 8 failed attempts). Install it from the browser, or build an APK in GitHub Actions (`android-app/`, Capacitor). See [SETUP-APLIKACJA.md](SETUP-APLIKACJA.md) (Polish).
 
 ### Dietitian (calories and macros)
 

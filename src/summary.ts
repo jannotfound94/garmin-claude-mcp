@@ -16,6 +16,7 @@ import { type DayForecast, fetchForecast } from "./weather";
 
 export const MARATHON = { date: "2027-04-25", goal: "poniżej 4:30:00", pace: "ok. 6:23/km" };
 
+const WEEKDAY_SHORT = ["Pn", "Wt", "Śr", "Cz", "Pt", "So", "Nd"];
 const isRun = (x: any) => /run/i.test(String(x?.type ?? ""));
 const km = (m: unknown) => (typeof m === "number" && m > 0 ? Math.round(m / 100) / 10 : null);
 
@@ -59,6 +60,30 @@ function activityItem(a: any) {
   };
 }
 
+/** Poniedziałek tygodnia, w którym jest data (tydzień poniedziałek-niedziela). */
+export function weekStart(date: string): string {
+  return addDays(date, -weekdayIndex(date));
+}
+
+/** 0 = poniedziałek ... 6 = niedziela. */
+function weekdayIndex(date: string): number {
+  return Math.max(0, ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"].indexOf(warsaw(new Date(`${date}T12:00:00Z`)).weekday));
+}
+
+/**
+ * Seria dni z zapisanym jedzeniem (dzień liczy się od minMeals posiłków). Dzień w toku nie przerywa serii:
+ * jeśli dzisiaj jest jeszcze mało wpisów, liczymy od wczoraj.
+ */
+export function loggingStreak(meals: (date: string) => number, today: string, minMeals = 2): number {
+  let d = meals(today) >= minMeals ? today : addDays(today, -1);
+  let n = 0;
+  while (n < 365 && meals(d) >= minMeals) {
+    n++;
+    d = addDays(d, -1);
+  }
+  return n;
+}
+
 const settled = async <T,>(errors: string[], label: string, p: Promise<T>): Promise<T | null> => {
   try {
     return await p;
@@ -79,15 +104,19 @@ export async function buildSummary(env: Env) {
   const g = garminClient(env);
   const loc = await weatherLocation(env).catch(() => null);
 
-  const [food, tomorrowInfo, events, acts, forecast, readiness, weights, cfg] = await Promise.all([
+  const monday = weekStart(today);
+  const sunday = addDays(monday, 6);
+  const logDates = Array.from({ length: 60 }, (_, i) => addDays(today, -59 + i));
+  const [food, tomorrowInfo, events, acts, forecast, readiness, weights, cfg, mealDays] = await Promise.all([
     settled(errors, "jedzenie", dayOverview(env, today)),
     settled(errors, "jutro", dayInfo(env, tomorrow)),
-    settled(errors, "plan", icu.events(today, addDays(today, 4))),
-    settled(errors, "aktywności", icu.activities(addDays(today, -1), today)),
+    settled(errors, "plan", icu.events(monday, sunday > addDays(today, 4) ? sunday : addDays(today, 4))),
+    settled(errors, "aktywności", icu.activities(addDays(today, -13), today)),
     loc ? settled(errors, "pogoda", fetchForecast(loc.lat, loc.lon, 3, ["poranek", "poludnie", "wieczor"])) : Promise.resolve(null),
     g ? settled(errors, "Garmin", g.readiness(today, today)) : Promise.resolve(null),
     st.getWeights(),
     st.getNutCfg(),
+    st.getMealsRange(logDates),
   ]);
 
   const plan = workouts(events ?? []).map(planItem);
@@ -113,6 +142,30 @@ export async function buildSummary(env: Env) {
       }
     : null;
 
+  // kilometry z biegów: dzienne z 14 dni (wykres) oraz bieżący tydzień względem planu
+  const runs = (acts ?? []).filter((a: any) => isRun(a));
+  const kmOn = (date: string) => Math.round(runs.filter((a: any) => String(a.start_date_local ?? "").startsWith(date)).reduce((sum: number, a: any) => sum + (km(a.distance ?? a.icu_distance) ?? 0), 0) * 10) / 10;
+  const activityDays = Array.from({ length: 14 }, (_, i) => {
+    const date = addDays(today, -13 + i);
+    return { date, km: kmOn(date) };
+  });
+  const plannedRuns = plan.filter((p) => isRun(p));
+  const week = Array.from({ length: 7 }, (_, i) => {
+    const date = addDays(monday, i);
+    const doneKm = date <= today ? kmOn(date) : 0;
+    return { date, weekday: WEEKDAY_SHORT[i], doneKm, planned: plannedRuns.some((p) => p.date === date), plannedKm: Math.round(plannedRuns.filter((p) => p.date === date).reduce((sum, p) => sum + (p.km ?? 0), 0) * 10) / 10, isToday: date === today };
+  });
+  const weekKm = Math.round(week.reduce((sum, d) => sum + d.doneKm, 0) * 10) / 10;
+  const weekPlannedKm = Math.round(week.reduce((sum, d) => sum + d.plannedKm, 0) * 10) / 10;
+  const mealCount = (date: string) => (mealDays?.[date] ?? []).length;
+  const logging = {
+    streak: loggingStreak(mealCount, today),
+    last7: Array.from({ length: 7 }, (_, i) => {
+      const date = addDays(today, -6 + i);
+      return { date, weekday: WEEKDAY_SHORT[weekdayIndex(date)], logged: mealCount(date) >= 2, isToday: date === today };
+    }),
+  };
+
   const gp = goalProgress(weights, cfg.goalWeightKg, today, cfg.goalDate);
   const weight = {
     last: gp.last,
@@ -125,6 +178,8 @@ export async function buildSummary(env: Env) {
     trendKgPerWeek: gp.trendKgPerWeek,
     daysSinceWeighIn: gp.daysSinceWeighIn,
     weeksLeft: gp.weeksLeft,
+    series: weights.slice(-16),
+    plan: weights[0] && cfg.goalWeightKg && cfg.goalDate && weights[0].kg > cfg.goalWeightKg ? { startDate: weights[0].date, startKg: weights[0].kg, goalDate: cfg.goalDate, goalKg: cfg.goalWeightKg } : null,
   };
 
   const recommendations = recommend({
@@ -156,7 +211,13 @@ export async function buildSummary(env: Env) {
       today: { planned: todayPlan, done },
       tomorrow: { dayType: tomorrowInfo?.dayType ?? null, dayTypeLabel: tomorrowInfo ? DAY_TYPE_PL[tomorrowInfo.dayType] : null, planned: tomorrowPlan },
       upcoming: plan.filter((p) => p.date > tomorrow),
+      activityDays,
+      week,
+      weekKm,
+      weekPlannedKm: weekPlannedKm || null,
+      last14Km: Math.round(activityDays.reduce((sum, d) => sum + d.km, 0) * 10) / 10,
     },
+    logging,
     weather,
     recovery,
     weight,
