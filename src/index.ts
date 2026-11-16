@@ -6,7 +6,7 @@ import TRENER from "../coach/TRENER.md";
 import { Icu, compactActivity, compactEvent, compactIntervals, compactWellness, computeSplits } from "./icu";
 import { capJson } from "./garmin";
 import { garminClient, nutritionReport } from "./diet";
-import { pingGemini } from "./gemini";
+import { DEFAULT_FALLBACK_MODEL, DEFAULT_MODEL, pingGemini } from "./gemini";
 import { runScheduler } from "./scheduler";
 import { distKm, resolveLocation } from "./location";
 import { fetchForecast } from "./weather";
@@ -516,7 +516,7 @@ async function dietSection(env: Env, password: string) {
   const cfg = await coach(env).getNutCfg();
   const slots = (l: { name: string; time: string }[]) => l.map((s) => `${esc(s.name)} ${s.time}`).join("; ");
   return `<h3>Dietetyk</h3>
-  <ul><li>${env.GEMINI_API_KEY ? "✅" : "❌"} GEMINI_API_KEY (darmowy klucz z aistudio.google.com) · model: ${esc(env.GEMINI_MODEL || "gemini-2.5-flash")}, zapasowy: ${esc(env.GEMINI_FALLBACK_MODEL || "gemini-2.5-flash-lite")}</li>
+  <ul><li>${env.GEMINI_API_KEY ? "✅" : "❌"} GEMINI_API_KEY (darmowy klucz z aistudio.google.com) · model: ${esc(env.GEMINI_MODEL || DEFAULT_MODEL)}, zapasowy: ${esc(env.GEMINI_FALLBACK_MODEL || DEFAULT_FALLBACK_MODEL)}</li>
   <li>Plan posiłków pn–pt: ${cfg.slots.length ? slots(cfg.slots) : "brak (ustaw na Telegramie: /posilki)"}${cfg.weekendSlots.length ? ` · weekend: ${slots(cfg.weekendSlots)}` : ""}</li>
   <li>Przypomnienia: ${cfg.remindersOn ? "włączone" : "wyłączone"}</li></ul>
   <form method="post">${hidden}${btn("gemini_test", "Sprawdź Gemini (test na opisie tekstowym)")}</form>`;

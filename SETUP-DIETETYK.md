@@ -26,7 +26,7 @@ Dzięki temu zużycie jest rozłożone na dwie platformy, a Claude nie traci tok
 1. Zmiany dietetyka są w gałęzi `claude/dietitian-agent` repozytorium. Scal je do głównej gałęzi (Pull request → Merge). Cloudflare wdroży zmiany sam, jeśli serwer był utworzony przyciskiem „Deploy to Cloudflare”. Jeśli wdrażasz ręcznie: `npm install && npm run deploy`.
 2. Cloudflare → **Workers & Pages** → Twój serwer (`garmin-claude-mcp`) → **Settings** → **Variables and Secrets** → **Add** → typ **Secret**:
    - nazwa: `GEMINI_API_KEY`, wartość: skopiowany klucz → **Deploy**.
-3. (Opcjonalnie) zmienne zwykłe `GEMINI_MODEL` i `GEMINI_FALLBACK_MODEL`, jeśli chcesz podmienić modele. Domyślnie: `gemini-2.5-flash` (główny) i `gemini-2.5-flash-lite` (zapasowy, gdy główny wyczerpie limit lub jest niedostępny). Jeśli Google wycofa model, wpisz tu nazwę aktualnego z AI Studio, bez zmiany kodu.
+3. (Opcjonalnie) zmienne zwykłe `GEMINI_MODEL` i `GEMINI_FALLBACK_MODEL`, jeśli chcesz podmienić modele. Domyślnie: `gemini-3.5-flash` (główny) i `gemini-3.5-flash-lite` (zapasowy, gdy główny wyczerpie limit lub jest niedostępny). Jeśli Google wycofa model, wpisz tu nazwę aktualnego z AI Studio, bez zmiany kodu.
 
 ## Krok 3. Odśwież webhook i sprawdź Gemini (1 minuta)
 

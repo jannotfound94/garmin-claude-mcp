@@ -7,8 +7,8 @@ import { type FoodItem, normalizeItem, validHhmm, normHhmm } from "./nutrition";
 const API = "https://generativelanguage.googleapis.com/v1beta/models";
 const BUDGET_MS = 22_000;
 const MIN_ATTEMPT_MS = 4_000;
-export const DEFAULT_MODEL = "gemini-2.5-flash";
-export const DEFAULT_FALLBACK_MODEL = "gemini-2.5-flash-lite";
+export const DEFAULT_MODEL = "gemini-3.5-flash";
+export const DEFAULT_FALLBACK_MODEL = "gemini-3.5-flash-lite";
 
 export interface MealAnalysis {
   isFood: boolean;
@@ -103,7 +103,14 @@ function userText(input: AnalyzeInput): string {
   return lines.join("\n");
 }
 
-function buildBody(input: AnalyzeInput, withThinking: boolean) {
+/**
+ * Ustawienia "myślenia": modele 3.x używają thinkingLevel, 2.5 thinkingBudget. Modele "thinking" wliczają myślenie
+ * do limitu tokenów, więc ograniczamy je, żeby JSON nie został ucięty. Które ustawienie przyjmie dany model,
+ * wychodzi w praktyce: odrzucone (400) kończy się próbą następnego wariantu, a ostatni nie ustawia niczego.
+ */
+const THINKING_VARIANTS: (Record<string, unknown> | null)[] = [{ thinkingLevel: "low" }, { thinkingBudget: 1024 }, null];
+
+function buildBody(input: AnalyzeInput, thinking: Record<string, unknown> | null) {
   const parts: any[] = [];
   if (input.image) parts.push({ inlineData: { mimeType: input.image.mime, data: input.image.b64 } });
   parts.push({ text: userText(input) });
@@ -114,9 +121,8 @@ function buildBody(input: AnalyzeInput, withThinking: boolean) {
       responseMimeType: "application/json",
       responseSchema: SCHEMA,
       temperature: 0.2,
-      maxOutputTokens: 4096,
-      // Modele "thinking" wliczają myślenie do limitu tokenów; mały budżet chroni przed ucięciem JSON-a.
-      ...(withThinking ? { thinkingConfig: { thinkingBudget: 1024 } } : {}),
+      maxOutputTokens: 8192,
+      ...(thinking ? { thinkingConfig: thinking } : {}),
     },
   };
 }
@@ -183,26 +189,32 @@ export function parseAnalysis(resp: any, model: string): MealAnalysis {
 export async function analyzeMeal(env: Env, input: AnalyzeInput): Promise<MealAnalysis> {
   if (!env.GEMINI_API_KEY) throw new Error("Brak GEMINI_API_KEY");
   const models = [env.GEMINI_MODEL || DEFAULT_MODEL, env.GEMINI_FALLBACK_MODEL || DEFAULT_FALLBACK_MODEL].filter((m, i, a) => a.indexOf(m) === i);
-  let lastErr: unknown = null;
+  const errors: Record<string, string> = {};
+  const fail = () => new Error(Object.values(errors).join(" | ").slice(0, 700) || "Gemini: przekroczony limit czasu");
   // Praca w tle po odpowiedzi do Telegrama (waitUntil) ma w Cloudflare ok. 30 s. Wspólny budżet czasu dla wszystkich
   // prób gwarantuje, że błąd zdąży dojść do Jana zamiast zostać ucięty razem z procesem.
   const deadline = Date.now() + BUDGET_MS;
   for (const model of models) {
-    for (const withThinking of [true, false]) {
+    for (const thinking of THINKING_VARIANTS) {
       const left = deadline - Date.now();
-      if (left < MIN_ATTEMPT_MS) throw lastErr instanceof Error ? lastErr : new Error("Gemini: przekroczony limit czasu");
+      if (left < MIN_ATTEMPT_MS) throw fail();
       try {
-        const resp = await callModel(env.GEMINI_API_KEY, model, buildBody(input, withThinking), left);
+        const resp = await callModel(env.GEMINI_API_KEY, model, buildBody(input, thinking), left);
         return parseAnalysis(resp, model);
       } catch (e) {
-        lastErr = e;
-        // 400 przy thinkingConfig = model go nie obsługuje: spróbuj ten sam model bez niego.
-        if (withThinking && e instanceof GeminiHttpError && e.status === 400) continue;
+        const msg = e instanceof Error ? e.message : String(e);
+        // 400 przy ustawieniu myślenia = model go zwykle nie obsługuje: ten sam model, następny wariant
+        // (prawdziwie zły request padnie we wszystkich wariantach, to tylko kilka szybkich prób).
+        if (thinking && e instanceof GeminiHttpError && e.status === 400) {
+          errors[model] = msg.slice(0, 300);
+          continue;
+        }
+        errors[model] = msg.slice(0, 300);
         break; // limit (429), 5xx, 404 (nazwa modelu), pusty wynik: następny model
       }
     }
   }
-  throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
+  throw fail();
 }
 
 /** Szybki test z panelu /setup: czy klucz i model działają (bez zdjęcia). */
