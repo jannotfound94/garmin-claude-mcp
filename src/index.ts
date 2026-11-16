@@ -260,8 +260,8 @@ export class MyMCP extends McpAgent<Env> {
         const [acts, events, well, garminToday] = await Promise.allSettled([
           icu.activities(addDays(local.date, -14)),
           icu.events(addDays(local.date, -7), addDays(local.date, 14)),
-          icu.wellness(addDays(local.date, -7)),
-          g ? g.readiness(addDays(local.date, -6), local.date) : Promise.resolve(NO_GARMIN),
+          g ? Promise.resolve(null) : icu.wellness(addDays(local.date, -7)), // Garmin data supersedes it
+          g ? g.readiness(addDays(local.date, -3), local.date) : Promise.resolve(NO_GARMIN),
         ]);
         const val = <T,>(r: PromiseSettledResult<T>, f: (x: T) => unknown) =>
           r.status === "fulfilled" ? f(r.value) : { error: String(r.reason) };
@@ -282,7 +282,7 @@ export class MyMCP extends McpAgent<Env> {
                 .map((x) => compactActivity(x)),
             ),
           },
-          rozmowa: mem.conversation.slice(-30).map((m) => ({
+          rozmowa: mem.conversation.slice(-16).map((m) => ({
             kiedy: fmtWarsaw(m.at),
             kto: m.from,
             tekst: m.text,
@@ -291,8 +291,8 @@ export class MyMCP extends McpAgent<Env> {
           dane: {
             biegi_14_dni: val(acts, (a: any[]) => a.map(compactActivity)),
             kalendarz_od_minus7_do_plus14: val(events, (e: any[]) => e.map(compactEvent)),
-            samopoczucie_7_dni: val(well, (w: any[]) => w.map(compactWellness)),
-            garmin_regeneracja_7_dni: val(garminToday, (x) => x),
+            ...(g ? {} : { samopoczucie_7_dni: val(well, (w: any) => (w as any[]).map(compactWellness)) }),
+            garmin_regeneracja_4_dni: val(garminToday, (x) => x),
           },
           telegram_skonfigurowany: Boolean(this.env.TELEGRAM_BOT_TOKEN && this.env.TELEGRAM_CHAT_ID),
           trasy: await (async () => {
