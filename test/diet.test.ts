@@ -8,6 +8,7 @@ import { parseAnalysis, applyBarcode, analyzeMeal } from "../src/gemini";
 
 const S = (t: string): any => (parseSlots(t) as any).slots;
 const cfg = { ...DEFAULT_CONFIG, slots: S("śniadanie 07:30; obiad 13:30; kolacja 19:30") };
+const C0 = { ...DEFAULT_CONFIG, deficitKcal: 0 };
 const mins = (t: string) => Number(t.slice(0, 2)) * 60 + Number(t.slice(3));
 const ev = (o: any) => evaluateReminders({ cfg, date: "2026-11-16", weekday: "Mon", state: {}, nowIso: "2026-11-16T10:00:00Z", ...o });
 
@@ -84,17 +85,17 @@ test("classifyDay", () => {
 });
 
 test("targets: g/kg, deficit only easy/rest, carbs floor", () => {
-  const t = computeTargets(DEFAULT_CONFIG, 80, "rest")!;
+  const t = computeTargets(C0, 80, "rest")!;
   assert.deepEqual([t.protein, t.carbs, t.fat], [144, 280, 80]);
   assert.equal(t.kcal, Math.round(144 * 4 + 280 * 4 + 80 * 9));
   const d = { ...DEFAULT_CONFIG, deficitKcal: 400 };
   assert.equal(computeTargets(d, 80, "easy")!.carbs, Math.round(360 - 100));
   assert.equal(computeTargets(d, 80, "long")!.carbs, 560);
   assert.match(computeTargets(d, 80, "long")!.note!, /bez deficytu/);
-  const big = computeTargets({ ...DEFAULT_CONFIG, deficitKcal: 700 }, 80, "rest")!; // 280 - 175 = 105 < floor 200 -> cut to 200
-  assert.equal(big.carbs, 200);
+  const big = computeTargets({ ...DEFAULT_CONFIG, deficitKcal: 700 }, 80, "rest")!; // 280 - 175 = 105 < podłoga 2 g/kg = 160 -> 160
+  assert.equal(big.carbs, 160);
   assert.ok(big.deficitApplied < 700 && big.note);
-  assert.equal(computeTargets(DEFAULT_CONFIG, null, "rest"), null);
+  assert.equal(computeTargets(C0, null, "rest"), null);
 });
 
 test("weight stats and TDEE calibration", () => {
@@ -192,7 +193,7 @@ test("analyzeMeal: 404 on primary falls back to the second model; both failing r
 
 test("targets from energy base: day factor, deficit only rest/easy, carbs fill the rest, carb floor", () => {
   const base = { kcal: 3000, source: "garmin" as const };
-  const e = computeTargets(DEFAULT_CONFIG, 107, "easy", base)!; // 3090 kcal; B 193, T 107 -> W (3090-772-963)/4
+  const e = computeTargets(C0, 107, "easy", base)!; // 3090 kcal; B 193, T 107 -> W (3090-772-963)/4
   assert.equal(e.protein, 193);
   assert.equal(e.fat, 107);
   assert.equal(e.carbs, 339);
@@ -208,14 +209,20 @@ test("targets from energy base: day factor, deficit only rest/easy, carbs fill t
   assert.match(long.note!, /bez deficytu/);
   // przy 107 kg białko i tłuszcz zabierają tyle kcal, że podłoga węglowodanów ogranicza deficyt w dzień bez biegu
   const heavy = computeTargets(d, 107, "rest", base)!;
-  assert.equal(heavy.carbs, Math.round(2.5 * 107));
+  assert.equal(heavy.carbs, Math.round(2 * 107));
   assert.ok(heavy.deficitApplied < 300);
-  assert.match(heavy.note!, /minimum węglowodanów/);
+  assert.match(heavy.note!, /minimum/);
+  // masa referencyjna 90 kg: białko/tłuszcz/podłoga liczone od niej, deficyt 300 mieści się w całości
+  const ref = computeTargets({ ...d, macroWeightKg: 90 }, 107, "rest", base)!;
+  assert.equal(ref.protein, Math.round(1.8 * 90));
+  assert.equal(ref.fat, 90);
+  assert.equal(ref.deficitApplied, 300);
+  assert.ok(Math.abs(ref.kcal - (3000 * 0.93 - 300)) <= 3, String(ref.kcal));
   const tight = computeTargets({ ...DEFAULT_CONFIG, deficitKcal: 700 }, 107, "rest", { kcal: 2500, source: "kalibracja" })!;
-  assert.equal(tight.carbs, Math.round(2.5 * 107)); // podłoga 2,5 g/kg
-  assert.match(tight.note!, /minimum węglowodanów/);
+  assert.equal(tight.carbs, Math.round(2 * 107)); // podłoga 2 g/kg
+  assert.match(tight.note!, /minimum/);
   // bez bazy: stare zachowanie z g/kg
-  assert.equal(computeTargets(DEFAULT_CONFIG, 107, "easy")!.source, "g/kg");
+  assert.equal(computeTargets(C0, 107, "easy")!.source, "g/kg");
 });
 
 test("explicit slot satisfies that slot regardless of the time of entry", () => {

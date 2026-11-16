@@ -51,7 +51,8 @@ Wyślij botowi kolejno:
 
 - `/waga`: bez wagi nie ma celów (liczone są w gramach na kg masy ciała). Waż się 2–3 razy w tygodniu, najlepiej rano.
 - `/posilki`: godziny, o których zwykle jesz. Dodaj tyle posiłków, ile chcesz (do 10, także przekąski, np. `podwieczorek 16:30`). Przypomnienie przychodzi, jeśli **3 godziny po planowanej godzinie** nie ma wpisu (zmiana: `/cel przypomnienie 120`). Pierwsze przypomnienie ma przyciski: 📸 Dodam / ⏭ Pominąłem / ⏰ Za godzinę (po godzinie przyjdzie jedno ostatnie przypomnienie, potem cisza). Przypomnienia nie przychodzą po 22:00 i przed 6:00.
-- `/cel`: pokazuje cele dla każdego typu dnia. Domyślnie: białko 1,8 g/kg, tłuszcz 1,0 g/kg, węglowodany od 3,5 g/kg (dzień bez biegu) do 7 g/kg (długi bieg), **bez deficytu** (utrzymanie wagi). Zmiany: `/cel deficyt 300`, `/cel bialko 2`, `/cel wegle dlugi 8`.
+- `/cel`: pokazuje cele dla każdego typu dnia i skąd pochodzą kalorie. Domyślnie: białko 1,8 g/kg, tłuszcz 1,0 g/kg i **deficyt 400 kcal w dni bez biegu i łatwe** (redukcja masy ciała; w dni akcentów i długich biegów bez deficytu). Zmiany: `/cel deficyt 300` (0 = utrzymanie wagi), `/cel bialko 1,6`, `/cel masa 95` (patrz niżej), `/cel wegle dlugi 8`.
+- **Masa referencyjna** (`/cel masa 95`): przy nadwadze gramy na kg liczone od całej wagi dają tyle białka i tłuszczu, że deficyt się nie mieści. Ustaw masę bliżej docelowej (np. waga docelowa), a białko, tłuszcz i minimum węglowodanów liczone będą od niej. `/cel masa auto` wraca do aktualnej wagi.
 
 ## Codzienne używanie
 
@@ -85,7 +86,7 @@ Gdy model nie jest pewny składnika, który wyraźnie zmienia wynik, zadaje jedn
 
 Zapotrzebowanie jest mnożone przez współczynnik zależny od typu dnia (bez biegu 0,93; łatwy bieg 1,03; akcent 1,08; długi bieg 1,20). **Białko** (domyślnie 1,8 g/kg) i **tłuszcz** (1,0 g/kg) idą z masy ciała, a **węglowodany dopełniają resztę**. Typ dnia serwer ustala z kalendarza intervals.icu i z tego, co faktycznie zrobiłeś (bierze cięższą wersję): dzień bez biegu, łatwy bieg, akcent (tempo/interwały) albo długi bieg (od 16 km lub 100 min, albo „długi” w nazwie).
 
-**Deficyt** (jeśli go ustawisz przez `/cel deficyt 300`) obowiązuje tylko w dni bez biegu i łatwe, kosztem węglowodanów, nigdy białka. Węglowodany nie spadają poniżej 2,5 g/kg, więc przy dużej masie ciała deficyt bywa ograniczony (bot pisze o tym w `/dzis`). Przy dużej masie ciała warto też obniżyć białko, np. `/cel bialko 1,5`, bo 1,8 g/kg całkowitej masy może być więcej, niż potrzeba.
+**Deficyt** (domyślnie 400 kcal, zmiana: `/cel deficyt 300`) obowiązuje tylko w dni bez biegu i łatwe, kosztem węglowodanów, nigdy białka. Węglowodany nie schodzą poniżej 2 g/kg masy referencyjnej, więc przy dużej masie ciała deficyt bywa ograniczony (bot pisze o tym w `/dzis`). Wtedy ustaw masę referencyjną (`/cel masa 95`) albo obniż białko (`/cel bialko 1,5`).
 
 `/cel` pokazuje aktualne cele dla każdego typu dnia i skąd pochodzą.
 

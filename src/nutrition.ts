@@ -55,6 +55,11 @@ export interface NutritionConfig {
   fatPerKg: number;
   carbsPerKg: Record<DayType, number>;
   deficitKcal: number; // stosowany tylko w dni "rest" i "easy"
+  /**
+   * Masa, od której liczone są gramy na kg (białko, tłuszcz, podłoga węglowodanów). Null = aktualna waga.
+   * Przy nadwadze gramy na kg od całej masy dają tyle białka i tłuszczu, że deficyt się nie mieści: wtedy ustaw masę bliżej docelowej.
+   */
+  macroWeightKg: number | null;
   weightFallbackKg: number | null;
 }
 
@@ -66,7 +71,8 @@ export const DEFAULT_CONFIG: NutritionConfig = {
   proteinPerKg: 1.8,
   fatPerKg: 1.0,
   carbsPerKg: { rest: 3.5, easy: 4.5, quality: 6, long: 7 },
-  deficitKcal: 0,
+  deficitKcal: 400, // Jan chce zredukować masę ciała (patrz TRENER.md); /cel deficyt 0 wyłącza
+  macroWeightKg: null,
   weightFallbackKg: null,
 };
 
@@ -329,7 +335,7 @@ export interface EnergyBase {
 
 /** Zapotrzebowanie danego typu dnia względem średniej z tygodnia z ok. 3 biegami (dzień bez biegu poniżej, długi bieg wyraźnie powyżej). */
 export const DAY_FACTOR: Record<DayType, number> = { rest: 0.93, easy: 1.03, quality: 1.08, long: 1.2 };
-const MIN_CARBS_PER_KG = 2.5; // poniżej tego biegaczowi nie schodzimy nawet w deficycie
+export const MIN_CARBS_PER_KG = 2; // poniżej tego (g na kg masy referencyjnej) biegaczowi nie schodzimy nawet w deficycie
 
 /**
  * Cele dnia. Gdy znamy rzeczywiste zapotrzebowanie (kalibracja z wagi albo średnia spalania z Garmina), kcal wynika
@@ -339,10 +345,11 @@ const MIN_CARBS_PER_KG = 2.5; // poniżej tego biegaczowi nie schodzimy nawet w 
  */
 export function computeTargets(cfg: NutritionConfig, weightKg: number | null, dayType: DayType, base?: EnergyBase | null): Targets | null {
   if (!weightKg || weightKg < 30 || weightKg > 250) return null;
-  const protein = cfg.proteinPerKg * weightKg;
-  const fat = cfg.fatPerKg * weightKg;
+  const refKg = cfg.macroWeightKg ?? weightKg; // masa, od której liczymy gramy na kg
+  const protein = cfg.proteinPerKg * refKg;
+  const fat = cfg.fatPerKg * refKg;
   const deficitDay = dayType === "rest" || dayType === "easy";
-  const floorCarbs = MIN_CARBS_PER_KG * weightKg;
+  const floorCarbs = MIN_CARBS_PER_KG * refKg;
   let note: string | null = null;
   let carbs: number;
   let deficit = 0;
@@ -359,7 +366,7 @@ export function computeTargets(cfg: NutritionConfig, weightKg: number | null, da
     if (carbs < floorCarbs) {
       deficit = Math.max(0, deficit - (floorCarbs - carbs) * 4);
       carbs = floorCarbs;
-      note = "Cel podniesiony do minimum węglowodanów (2,5 g/kg): przy tej wadze i białku/tłuszczu nie da się go obniżyć.";
+      note = "Deficyt ograniczony: węglowodany nie schodzą poniżej minimum (2 g/kg). Obniż białko/tłuszcz lub ustaw masę referencyjną: /cel masa.";
     }
     return {
       kcal: r0(4 * protein + 4 * carbs + 9 * fat),
@@ -373,13 +380,13 @@ export function computeTargets(cfg: NutritionConfig, weightKg: number | null, da
     };
   }
 
-  carbs = cfg.carbsPerKg[dayType] * weightKg;
+  carbs = cfg.carbsPerKg[dayType] * refKg;
   if (cfg.deficitKcal > 0) {
     if (deficitDay) {
       const cut = Math.min(cfg.deficitKcal / 4, Math.max(0, carbs - floorCarbs));
       carbs -= cut;
       deficit = r0(cut * 4);
-      if (deficit < cfg.deficitKcal) note = "Deficyt ograniczony: węglowodany nie schodzą poniżej 2,5 g/kg.";
+      if (deficit < cfg.deficitKcal) note = "Deficyt ograniczony: węglowodany nie schodzą poniżej minimum (2 g/kg).";
     } else note = "Dzień mocnego treningu: bez deficytu, pełne paliwo.";
   }
   const kcal = 4 * protein + 4 * carbs + 9 * fat;

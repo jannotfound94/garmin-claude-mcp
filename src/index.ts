@@ -288,6 +288,7 @@ export class MyMCP extends McpAgent<Env> {
       "Zmienia ustawienia dietetyka Jana, gdy sam o to poprosi lub gdy ustalicie cel (np. redukcja). Zmieniaj tylko to, co wynika z rozmowy. Deficyt dotyczy wyłącznie dni bez biegu i łatwych; w dni akcentów i długich biegów serwer go ignoruje.",
       {
         deficitKcal: z.number().min(0).max(700).optional().describe("Dzienny deficyt kcal (0 = utrzymanie)"),
+        macroWeightKg: z.number().min(40).max(200).nullable().optional().describe("Masa referencyjna (kg), od której liczone są gramy na kg (białko, tłuszcz, minimum węglowodanów). null = aktualna waga. Przy nadwadze ustaw bliżej docelowej, inaczej deficyt się nie mieści."),
         proteinPerKg: z.number().min(1.2).max(2.5).optional(),
         fatPerKg: z.number().min(0.6).max(1.5).optional(),
         carbsPerKg: z
@@ -309,7 +310,7 @@ export class MyMCP extends McpAgent<Env> {
           ...rest,
           ...(carbsPerKg ? { carbsPerKg: { ...cur.carbsPerKg, ...Object.fromEntries(Object.entries(carbsPerKg).filter(([, v]) => v !== undefined)) } } : {}),
         });
-        return text({ deficyt_kcal: next.deficitKcal, bialko_g_na_kg: next.proteinPerKg, tluszcz_g_na_kg: next.fatPerKg, weglowodany_g_na_kg: next.carbsPerKg, przypomnienie_po_min: next.remindAfterMin });
+        return text({ deficyt_kcal: next.deficitKcal, masa_referencyjna_kg: next.macroWeightKg, bialko_g_na_kg: next.proteinPerKg, tluszcz_g_na_kg: next.fatPerKg, weglowodany_g_na_kg: next.carbsPerKg, przypomnienie_po_min: next.remindAfterMin });
       },
     );
 

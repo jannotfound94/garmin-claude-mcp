@@ -90,9 +90,11 @@ test("end to end: setup, photo, correction, delete, text meal, coach passthrough
   assert.equal(meals.length, 1);
   assert.equal(meals[0].totals.kcal, 500);
   assert.equal(meals[0].time, "08:00");
-  assert.match(lastText(), /śniadanie · 08:00 — Jajecznica z chlebem/);
-  assert.match(lastText(), /Dziś: 500\/\d+ kcal/);
-  assert.match(lastText(), /❓ Ile oleju\?/);
+  assert.match(lastText(), /^🍽 <b>śniadanie<\/b> · 08:00\n<i>Jajecznica z chlebem<\/i>/);
+  assert.equal(sent[sent.length - 1].parse_mode, "HTML");
+  assert.match(lastText(), /🔥 <b>500<\/b> \/ \d+ kcal/);
+  assert.match(lastText(), /🎯 Cel uwzględnia deficyt \d+ kcal/); // domyślny deficyt 400 w dzień bez biegu/łatwy
+  assert.match(lastText(), /❓ <b>Ile oleju\?<\/b>/);
   const mealMsgId = msgId;
   assert.equal(sent[sent.length - 1].reply_markup.inline_keyboard[0].length, 2);
 
@@ -128,8 +130,8 @@ test("end to end: setup, photo, correction, delete, text meal, coach passthrough
 
   // /dzis and /usun
   await send({ message: { chat, date: now(), text: "/dzis" } });
-  assert.match(lastText(), /1\. 08:00 Jajecznica/);
-  assert.match(lastText(), /2\. 08:00 Banan/);
+  assert.match(lastText(), /1\. <b>08:00<\/b> Jajecznica/);
+  assert.match(lastText(), /2\. <b>08:00<\/b> Banan/);
   await send({ message: { chat, date: now(), text: "/usun 2" } });
   assert.equal((await state.getMeals("2026-11-16")).length, 1);
 
@@ -208,7 +210,8 @@ test("nutritionReport shape (no Garmin)", async () => {
   assert.equal(r.kalibracja_zapotrzebowania.ready, false);
   assert.match(String(r.garmin_uwagi), /nie jest podłączony/);
   assert.equal(r.typ_dnia.typ, "dzień bez biegu");
-  assert.ok(r.cele_dzis.kcal > 2000);
+  assert.ok(r.cele_dzis.kcal > 1800);
+  assert.equal(r.ustawienia.deficyt_kcal, 400);
   mock.timers.reset();
 });
 
@@ -239,16 +242,29 @@ test("meal described as 'śniadanie' but sent at 15:01 is labelled and counted a
   assert.match(userPart, /Plan posiłków Jana.*śniadanie, obiad, kolacja/);
   const meals = await state.getMeals("2026-11-17");
   assert.equal(meals[0].slot, "śniadanie");
-  assert.match(lastText(), /^🍽 śniadanie · 15:01/);
+  assert.match(lastText(), /^🍽 <b>śniadanie<\/b> · 15:01/);
   // correction without a slot keeps the slot
   geminiQueue.push({ is_food: true, meal_label: "Szakszuka", meal_slot: null, items: [{ name: "szakszuka", grams: 300, kcal: 380, protein_g: 20, carbs_g: 14, fat_g: 26, confidence: "high", basis: "estimate" }] });
   await send({ message: { chat, date: now(), text: "to było 300 g", reply_to_message: { message_id: msgId } } });
   assert.equal((await state.getMeals("2026-11-17"))[0].slot, "śniadanie");
-  assert.match(lastText(), /^🍽 śniadanie/);
+  assert.match(lastText(), /^🍽 <b>śniadanie<\/b>/);
   // breakfast reminder: the slot counts as done even though the entry is at 15:01 (set earlier than reminder time via state)
   sent.length = 0;
   await state.setReminders({}, "2026-11-17");
   await runDietReminders(env);
   assert.ok(!sent.some((m) => /śniadanie \(plan/.test(m.text)), "śniadanie nie jest przypominane");
+  mock.timers.reset();
+});
+
+test("model/user text with <, > and & cannot break the HTML message", async () => {
+  mock.timers.reset(); mock.timers.enable({ apis: ["Date"], now: new Date("2026-11-18T10:00:00Z") });
+  geminiQueue.push({ is_food: true, meal_label: "Kanapka <b>x</b> & sos", question: "Czy sos > 20 g & ostry?", items: [{ name: "a <i> & b", grams: 50, kcal: 100, protein_g: 5, carbs_g: 10, fat_g: 4, confidence: "low", basis: "estimate" }] });
+  await send({ message: { chat, date: now(), text: "/jem test" } });
+  const t = lastText();
+  assert.ok(t.includes("a &lt;i&gt; &amp; b"));
+  assert.ok(t.includes("Kanapka &lt;b&gt;x&lt;/b&gt; &amp; sos"));
+  assert.ok(t.includes("Czy sos &gt; 20 g &amp; ostry?"));
+  assert.ok(!/<b>x<\/b>|<i> &/.test(t));
+  assert.match(t, /\(\?\)/); // niska pewność oznaczona
   mock.timers.reset();
 });
