@@ -19,6 +19,7 @@ import {
   validHhmm,
 } from "./nutrition";
 import { buildPlan, buildRoutes, buildSummary, buildWeek } from "./summary";
+import { buildTextRoutes } from "./textroute";
 import { coach } from "./telegram";
 import { daysBetween, warsaw, warsawToUtc } from "./time";
 
@@ -309,6 +310,24 @@ export async function handleApi(request: Request, env: Env): Promise<Response> {
       const res = await buildRoutes(env, Math.round(km * 10) / 10, url.origin);
       const problem = res as { error?: string; message?: string };
       if (problem.error) return fail(problem.error === "no_ors_key" ? 501 : 409, problem.error, problem.message ?? "Trasy niedostępne.");
+      return json(res);
+    }
+
+    if (path === "/api/routes/text" && method === "POST") {
+      const text = String((await readJson(request)).text ?? "").replace(/\s+/g, " ").trim();
+      if (text.length < 8) throw new HttpError(400, "too_short", "Opisz trasę własnymi słowami (miejsca, dystans).");
+      if (text.length > 800) throw new HttpError(400, "too_long", "Opis jest za długi (do 800 znaków).");
+      let res;
+      try {
+        res = await buildTextRoutes(env, text, url.origin);
+      } catch (e) {
+        mapGeminiError(e);
+      }
+      const problem = res as { error?: string; message?: string };
+      if (problem.error) {
+        const status = problem.error === "no_ors_key" || problem.error === "no_gemini_key" ? 501 : problem.error === "route_failed" ? 502 : 422;
+        return fail(status, problem.error, problem.message ?? "Nie udało się wyznaczyć trasy.");
+      }
       return json(res);
     }
 

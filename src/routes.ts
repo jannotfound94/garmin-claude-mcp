@@ -33,7 +33,7 @@ export interface RouteOption {
   retrace_pct: number; // share of the loop run twice (out-and-back parts); 0 = clean loop
   compact?: number; // 0-1, how "round" the loop is (4*pi*area/length^2); thin out-and-back shapes are near 0
   trimmed_m?: number; // metres of needless spurs and small loops cut out of the routed path (see tidyRoute)
-  source: "parki" | "ors"; // through parks/unpaved paths (own generator) or an OpenRouteService round trip
+  source: "parki" | "ors" | "opis"; // through parks/unpaved paths (own generator), an OpenRouteService round trip, or the places Jan described
   via?: string[]; // names of the parks the loop goes through
   coords: [number, number][]; // [lon, lat]
 }
@@ -46,6 +46,9 @@ export interface RouteProposal {
   start_label: string;
   options: RouteOption[];
   chosen?: string;
+  /** Trasa z opisu: rozpoznane punkty po kolei (start, miejsca, meta) i oryginalny opis. */
+  points?: { name: string; lat: number; lon: number; kind: string; confidence: "high" | "low" }[];
+  request?: string;
 }
 
 export async function geocode(apiKey: string, text: string): Promise<LatLon & { label: string }> {
@@ -102,15 +105,15 @@ async function loop(apiKey: string, start: LatLon, meters: number, seed: number)
   return parseRoute(res);
 }
 
-type Measured = Omit<RouteOption, "label" | "source" | "via">;
+export type Measured = Omit<RouteOption, "label" | "source" | "via">;
 
-async function parseRoute(res: Response): Promise<Measured> {
+async function parseRoute(res: Response, protect: LatLon[] = []): Promise<Measured> {
   if (!res.ok) throw new Error(`OpenRouteService ${res.status}: ${(await res.text()).slice(0, 200)}`);
   const j: any = await res.json();
   const f = j.features?.[0];
   if (!f) throw new Error("OpenRouteService: brak trasy");
   const ex = f.properties?.extras ?? {};
-  const tidy = tidyRoute(f.geometry.coordinates as [number, number][]);
+  const tidy = tidyRoute(f.geometry.coordinates as [number, number][], protect.map((p): [number, number] => [p.lon, p.lat]));
   const unpaved = summaryPct(ex.surface?.summary, (v) => UNPAVED.has(v));
   const paved = summaryPct(ex.surface?.summary, (v) => PAVED.has(v));
   return {
@@ -143,6 +146,7 @@ interface Pt {
   d: number; // distance along the route, m
   orig: boolean; // a vertex returned by the router (interpolated samples are dropped from the output)
   keep?: boolean; // end of a cut: always emitted
+  prot?: boolean; // within 40 m of a place Jan asked to visit: an excursion containing it is deliberate
 }
 
 /** The route as points at most `step` m apart (original vertices included), with distance along the route. */
@@ -179,7 +183,7 @@ export const routeLengthM = (coords: number[][]) => (coords.length ? (() => { co
  * along the route (e.g. leaving and returning home) are untouched. If more than 25% of the route would go, the
  * route is returned as it was: that is not a detour but a different kind of route.
  */
-export function tidyRoute(coords: [number, number][]): { coords: [number, number][]; trimmedM: number; lengthM: number } {
+export function tidyRoute(coords: [number, number][], protect: [number, number][] = []): { coords: [number, number][]; trimmedM: number; lengthM: number } {
   if (coords.length < 4) return { coords, trimmedM: 0, lengthM: routeLengthM(coords) };
   let pts = samplePoints(coords);
   const total = pts[pts.length - 1].d;
@@ -187,6 +191,14 @@ export function tidyRoute(coords: [number, number][]): { coords: [number, number
   const NEAR = 15;
   let trimmed = 0;
   for (let guard = 0; guard < 40; guard++) {
+    // Odnoga, w której leży miejsce wskazane przez Jana (np. dojście do punktu i powrót), jest zamierzona i zostaje.
+    const prefix = [0];
+    if (protect.length) {
+      const xy = plane(coords[0][1]);
+      const pp = protect.map(([lon, lat]) => xy(lon, lat));
+      pts.forEach((p) => (p.prot = pp.some(([x, y]) => Math.hypot(p.x - x, p.y - y) < 40)));
+    }
+    pts.forEach((p) => prefix.push(prefix[prefix.length - 1] + (p.prot ? 1 : 0)));
     const grid = new Map<string, number[]>();
     pts.forEach((p, i) => {
       const k = `${Math.floor(p.x / CELL)},${Math.floor(p.y / CELL)}`;
@@ -201,7 +213,7 @@ export function tidyRoute(coords: [number, number][]): { coords: [number, number
         for (let dy = -1; dy <= 1; dy++)
           for (const j of grid.get(`${cx + dx},${cy + dy}`) ?? []) {
             const gap = pts[j].d - pts[i].d;
-            if (j > i && gap >= 40 && gap <= 600 && j > bestJ && Math.hypot(pts[j].x - pts[i].x, pts[j].y - pts[i].y) < NEAR) bestJ = j;
+            if (j > i && gap >= 40 && gap <= 600 && j > bestJ && Math.hypot(pts[j].x - pts[i].x, pts[j].y - pts[i].y) < NEAR && prefix[j] - prefix[i + 1] === 0) bestJ = j;
           }
       if (bestJ > 0) cut = [i, bestJ];
     }
@@ -236,6 +248,25 @@ export function compactness(coords: number[][]): number {
     len += Math.hypot(x1 - x0, y1 - y0);
   }
   return len > 0 ? Math.min(1, (4 * Math.PI * Math.abs(area / 2)) / (len * len)) : 0;
+}
+
+/** Trasa przez dokładnie podane punkty (start, miejsca, meta), zmierzona jak pozostałe. `protect` to miejsca, których czyszczenie nie może wyciąć. */
+export async function routeThrough(apiKey: string, pts: LatLon[], opts: { green?: boolean; quiet?: boolean; protect?: LatLon[] } = {}): Promise<Measured> {
+  const coords = pts.map((p) => [p.lon, p.lat]);
+  const weightings = { ...(opts.green === false ? {} : { green: 1 }), ...(opts.quiet === false ? {} : { quiet: 1 }) };
+  const res = await fetch(`${ORS}/v2/directions/foot-hiking/geojson`, {
+    method: "POST",
+    signal: AbortSignal.timeout(25000),
+    headers: { Authorization: apiKey, "Content-Type": "application/json", Accept: "application/geo+json, application/json" },
+    body: JSON.stringify({
+      coordinates: coords,
+      instructions: false,
+      extra_info: ["surface", "waytype", "green"],
+      radiuses: coords.map((_, i) => (i === 0 || i === coords.length - 1 ? 350 : 600)),
+      options: { avoid_features: ["steps"], ...(Object.keys(weightings).length ? { profile_params: { weightings } } : {}) },
+    }),
+  });
+  return parseRoute(res, opts.protect ?? []);
 }
 
 /** A loop start -> anchors -> start, routed on foot-hiking with the same measurements. */
@@ -426,8 +457,10 @@ export function toGpx(name: string, coords: number[][]): string {
 </gpx>`;
 }
 
-export function mapPage(title: string, coords: number[][], gpxUrl: string, details = ""): string {
+export function mapPage(title: string, coords: number[][], gpxUrl: string, details = "", points: { name: string; lat: number; lon: number; confidence?: string }[] = []): string {
   const latlngs = JSON.stringify(coords.map(([lon, lat]) => [lat, lon]));
+  // Numerowane punkty trasy z opisu; nazwy trafiają do skryptu jako JSON bez znaków < i >.
+  const marks = JSON.stringify(points.map((p) => [p.lat, p.lon, p.name, p.confidence === "low"])).replace(/</g, "\\u003c");
   return `<!doctype html><html lang="pl"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>${title}</title>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
@@ -438,6 +471,6 @@ a.btn{background:#1a73e8;color:#fff;padding:8px 12px;border-radius:6px;text-deco
 <body><header><a class="btn back" href="/app/#/plan" onclick="if(history.length>1){history.back();return false}">← Wróć</a><div class="t"><b>${title}</b>${details ? `<small>${details}</small>` : ""}</div><a class="btn" href="${gpxUrl}">Otwórz GPX</a></header><div id="map"></div>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
 <script>const p=${latlngs};const m=L.map('map');L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'&copy; OpenStreetMap'}).addTo(m);
-const l=L.polyline(p,{color:'#d32f2f',weight:5}).addTo(m);L.circleMarker(p[0],{radius:7,color:'#1a73e8'}).addTo(m).bindPopup('Start / meta');m.fitBounds(l.getBounds(),{padding:[20,20]});</script>
+const l=L.polyline(p,{color:'#d32f2f',weight:5}).addTo(m);L.circleMarker(p[0],{radius:7,color:'#1a73e8'}).addTo(m).bindPopup('Start / meta');const mk=${marks};mk.forEach((q,i)=>{L.marker([q[0],q[1]],{icon:L.divIcon({className:'',html:'<div style="background:'+(q[3]?'#e8710a':'#1a73e8')+';color:#fff;border-radius:50%;width:24px;height:24px;line-height:24px;text-align:center;font:700 13px system-ui;border:2px solid #fff;box-shadow:0 1px 4px #0006">'+(i+1)+'</div>',iconSize:[24,24],iconAnchor:[12,12]})}).addTo(m).bindPopup((i+1)+'. '+q[2].replace(/[<>&]/g,''));});m.fitBounds(l.getBounds(),{padding:[20,20]});</script>
 </body></html>`;
 }

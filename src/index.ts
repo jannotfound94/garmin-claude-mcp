@@ -13,6 +13,7 @@ import { distKm, resolveLocation } from "./location";
 import { currentLocation, weatherLocation } from "./loc";
 import { fetchForecast } from "./weather";
 import { geocode, mapPage, proposeLoops, toGpx } from "./routes";
+import { buildTextRoutes } from "./textroute";
 import { loadAnchors, warmAnchors } from "./anchors";
 import { hasTelegram, notifyCoach } from "./notify";
 import { coach, handleTelegramWebhook, sendTelegram, sendTelegramFile, tg, webhookSecret } from "./telegram";
@@ -241,6 +242,18 @@ export class MyMCP extends McpAgent<Env> {
           })),
           uwaga: "Dane o nawierzchni pochodzą z OpenStreetMap i bywają niepełne (stąd „nieznana”).",
         });
+      },
+    );
+
+    this.server.tool(
+      "proposeRouteFromText",
+      "Wyznacz trasę biegową z opisu słownego Jana (np. „z domu nad Wisłę przez Fort Sokolnickiego, plaża Żoliborz, ulica Kaniowa, park przy Cytadeli i do domu” albo „10 km, najpierw po tej stronie Wisły, Gdańskim na drugą stronę, powrót kładką”). Miejsca są wyszukiwane na mapie i trasa idzie dokładnie przez nie w podanej kolejności; przy podanym dystansie trasa jest wydłużana objazdem. Zwraca rozpoznane punkty (sprawdź, czy dobrze), ostrzeżenia i linki do mapy z GPX. Przekaż opis Jana możliwie dosłownie.",
+      { description: z.string().min(8).max(800).describe("Opis trasy własnymi słowami Jana") },
+      async ({ description }) => {
+        const state = coach(this.env);
+        const { origin } = await state.getRouteSettings();
+        const res = await buildTextRoutes(this.env, description, origin ?? "");
+        return text(res);
       },
     );
 
@@ -683,7 +696,7 @@ const defaultHandler = {
       }
       const title = `${name.replace(/ (\d+(?:\.\d+)?) km$/, " · $1 km")}`;
       const details = `${o.unpaved_pct}% nieutwardzonej, zieleń ${o.green_avg}/10, ${o.retrace_pct}% dwa razy${o.via ? `, przez ${o.via.join(", ")}` : ""}`;
-      return new Response(mapPage(esc(title), o.coords, `/trasa/${p.id}/${o.label}.gpx`, esc(details)), { headers: html });
+      return new Response(mapPage(esc(title), o.coords, `/trasa/${p.id}/${o.label}.gpx`, esc(details), p.points), { headers: html });
     }
     if (url.pathname === "/setup") return handleSetup(request, env, url.origin);
     if (url.pathname !== "/authorize") return new Response("Not found", { status: 404 });
