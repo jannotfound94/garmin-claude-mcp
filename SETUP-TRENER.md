@@ -118,14 +118,15 @@ Zadanie już istnieje. Trzeba mu dać dostęp do danych i „dzwonek”, którym
 
 ## Krok 6. Garmin Connect (dodatkowe dane z zegarka)
 
-Na tej samej stronie `/setup`, w sekcji **Garmin Connect**:
-1. Wpisz e-mail i hasło, którymi logujesz się do Garmin Connect, i kliknij **Połącz z Garmin Connect**.
-2. Jeśli Garmin wyśle Ci kod weryfikacyjny (e-mailem lub SMS-em), na stronie pojawi się pole na kod. Wpisz go i kliknij **Potwierdź kod**. Masz na to kilka minut.
-3. Po połączeniu kliknij **Sprawdź dane z Garmin Connect**. Powinieneś zobaczyć m.in. gotowość do treningu, Body Battery i sen.
+1. Na komputerze wejdź na Garmin Connect w przeglądarce i utwórz **Osobisty klucz API** (strona „Osobisty klucz API”). Klucz jest pokazywany tylko raz, więc od razu go skopiuj.
+2. W Cloudflare (**Compute (Workers)** → **garmin-claude-mcp** → **Settings** → **Variables and Secrets** → **+ Add**) dodaj:
+   - **Type:** Secret
+   - **Variable name:** `GARMIN_PERSONAL_API_KEY`
+   - **Value:** wklejony klucz
+   i kliknij **Deploy**.
+3. Na stronie `/setup` w sekcji **Garmin Connect** kliknij **Sprawdź dane z Garmin Connect**. Powinieneś zobaczyć „Garmin Connect działa ✅”.
 
-Hasło jest użyte jednorazowo i nigdzie nie jest zapisywane. Serwer zachowuje tylko klucz dostępu, ważny ok. roku. Po roku (albo po zmianie hasła w Garminie) powtórz ten krok.
-
-Jeśli pojawi się błąd w rodzaju „Garmin mógł zablokować logowanie z serwera”, napisz do Claude. To nieoficjalne połączenie i Garmin czasem je blokuje. Trener działa wtedy dalej na danych z intervals.icu.
+Klucz jest ważny rok. Po roku utwórz nowy w Garmin Connect i podmień wartość w Cloudflare.
 
 ## Krok 7. Wyłączenie starych zadań
 

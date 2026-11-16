@@ -1,6 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
 import { fmtWarsaw } from "./time";
-import type { GarminPendingMfa, GarminTokens } from "./garmin";
+import type { GarminToken } from "./garmin";
 
 /**
  * The coach's memory. One Durable Object instance ("jan") holds everything, so updates from the
@@ -176,22 +176,14 @@ export class CoachState extends DurableObject<Env> {
     await this.save(m);
   }
 
-  // ---------- Garmin Connect tokens (kept apart from the memory the agent sees) ----------
+  // ---------- Garmin Personal API bearer token cache ----------
 
-  async getGarmin(): Promise<GarminTokens | null> {
-    return (await this.ctx.storage.get<GarminTokens>("garmin")) ?? null;
+  async getGarminToken(): Promise<GarminToken | null> {
+    return (await this.ctx.storage.get<GarminToken>("garminToken")) ?? null;
   }
-  async setGarmin(t: GarminTokens | null) {
-    if (t) await this.ctx.storage.put("garmin", t);
-    else await this.ctx.storage.delete("garmin");
-  }
-  async getGarminPending(): Promise<GarminPendingMfa | null> {
-    const p = await this.ctx.storage.get<GarminPendingMfa>("garminPending");
-    return p && Date.now() - p.createdAt < 10 * 60_000 ? p : null;
-  }
-  async setGarminPending(p: GarminPendingMfa | null) {
-    if (p) await this.ctx.storage.put("garminPending", p);
-    else await this.ctx.storage.delete("garminPending");
+  async setGarminToken(t: GarminToken | null) {
+    if (t) await this.ctx.storage.put("garminToken", t);
+    else await this.ctx.storage.delete("garminToken");
   }
 
   /** Manual wake-up from the setup page. */
