@@ -72,7 +72,7 @@ You will see a password page. Enter your `MCP_PASSWORD`. Once connected on web, 
 | `getGarminRecovery` | Garmin Connect Personal API: sleep, HRV, stress, Body Battery, daily summary |
 | `getGarminFitness` | Garmin Connect Personal API: VO2max, fitness age |
 | `getWeather` | Open-Meteo forecast per day and run window (best start hour, verdict dobra/znosna/zla) for moving runs to better days |
-| `proposeRoutes` | Two running loops (OpenRouteService) of a given length, preferring unpaved paths and greenery |
+| `proposeRoutes` | Two running loops of a given length. Loops are routed through parks, woods and soft-surface paths found in OpenStreetMap (Overpass, cached 30 days), measured for length, surface, greenery and out-and-back share; OpenRouteService round trips are the fallback |
 | `chooseRoute` | Sends the chosen loop as GPX on Telegram |
 | `getCoachContext` | Coach agent: instructions, memory, conversation, data snapshot |
 | `sendMessage` | Coach agent: sends a Telegram message |

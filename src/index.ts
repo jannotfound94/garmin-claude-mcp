@@ -8,6 +8,7 @@ import { GarminPersonal, capJson } from "./garmin";
 import { runScheduler } from "./scheduler";
 import { fetchForecast } from "./weather";
 import { geocode, mapPage, proposeLoops, toGpx } from "./routes";
+import { type Anchor, anchorRadiusM, fetchAnchors } from "./parks";
 import { coach, handleTelegramWebhook, sendTelegram, sendTelegramFile, tg, webhookSecret } from "./telegram";
 import { addDays, daysBetween, fmtWarsaw, warsaw, warsawToUtc } from "./time";
 
@@ -25,6 +26,29 @@ function garminClient(env: Env): GarminPersonal | null {
 async function weatherLocation(env: Env) {
   const { home, last } = await coach(env).getRouteSettings();
   return home ?? last ?? null;
+}
+
+/**
+ * Parks and soft paths around the start (OpenStreetMap via Overpass), cached for 30 days: they hardly
+ * change, and the public Overpass server is slow and sometimes unavailable. On failure the routes
+ * simply fall back to OpenRouteService's own round trips.
+ */
+async function loadAnchors(env: Env, start: { lat: number; lon: number }, targetKm: number) {
+  const radius = anchorRadiusM(targetKm);
+  const key = `anchors:${start.lat.toFixed(3)},${start.lon.toFixed(3)}:${radius}`;
+  const st = coach(env);
+  const hit = await st.getCache(key, 30 * 86400_000);
+  if (hit) {
+    const cached = JSON.parse(hit) as Anchor[];
+    return { anchors: cached, info: `dane o parkach z pamięci (${cached.length} miejsc)` };
+  }
+  try {
+    const anchors = await fetchAnchors(start, radius);
+    await st.setCache(key, JSON.stringify(anchors));
+    return { anchors, info: `pobrano dane o parkach (${anchors.length} miejsc)` };
+  } catch (e) {
+    return { anchors: [] as Anchor[], info: `bez danych o parkach: ${String(e).slice(0, 120)}` };
+  }
 }
 
 const NO_LOCATION = "Pogoda niedostępna: brak punktu startu (adres lub współrzędne na stronie /setup albo udostępniona lokalizacja).";
@@ -212,7 +236,8 @@ export class MyMCP extends McpAgent<Env> {
         const recent = last && Date.now() - Date.parse(last.at) < 3 * 3600_000 ? last : null;
         const start = recent ?? home;
         if (!start) return text("Trasy niedostępne: brak punktu startu (ustaw adres domowy na stronie /setup albo poproś Jana o udostępnienie lokalizacji).");
-        const options = await proposeLoops(this.env.ORS_API_KEY, start, distanceKm);
+        const { anchors, info } = await loadAnchors(this.env, start, distanceKm);
+        const options = await proposeLoops(this.env.ORS_API_KEY, start, distanceKm, anchors);
         const id = crypto.randomUUID().replace(/-/g, "").slice(0, 16);
         await state.saveProposal({
           id,
@@ -235,6 +260,8 @@ export class MyMCP extends McpAgent<Env> {
             sciezki_i_alejki_proc: o.paths_pct,
             zielen_0_10: o.green_avg,
             odcinki_biegane_dwa_razy_proc: o.retrace_pct,
+            typ: o.source === "parki" ? "pętla przez parki i ścieżki" : "pętla z OpenRouteService",
+            ...(o.via ? { przez: o.via } : {}),
             mapa: `${base}/trasa/${id}/${o.label}`,
           })),
           uwaga: "Dane o nawierzchni pochodzą z OpenStreetMap i bywają niepełne (stąd „nieznana”).",
@@ -526,12 +553,19 @@ async function handleSetup(request: Request, env: Env, origin: string): Promise<
         const { home } = await coach(env).getRouteSettings();
         if (!home) throw new Error("Najpierw zapisz punkt startu.");
         await coach(env).setOrigin(origin);
-        const options = await proposeLoops(env.ORS_API_KEY, home, 5);
+        const { anchors, info } = await loadAnchors(env, home, 5);
+        const options = await proposeLoops(env.ORS_API_KEY, home, 5, anchors);
         const id = crypto.randomUUID().replace(/-/g, "").slice(0, 16);
         await coach(env).saveProposal({ id, created: new Date().toISOString(), target_km: 5, start: home, start_label: "dom", options });
-        notice = options
-          .map((o) => `Trasa ${o.label}: ${o.distance_km} km, nieutwardzona ${o.unpaved_pct}%, zieleń ${o.green_avg}/10 → ${origin}/trasa/${id}/${o.label}`)
-          .join(" | ");
+        notice =
+          `(${info}) ` +
+          options
+            .map(
+              (o) =>
+                `Trasa ${o.label}: ${o.distance_km} km, ${o.source === "parki" ? "przez parki" : "pętla ORS"}${o.via ? ` (${o.via.join(", ")})` : ""}, ` +
+                `nieutwardzona ${o.unpaved_pct}%, zieleń ${o.green_avg}/10, dwa razy ${o.retrace_pct}% → ${origin}/trasa/${id}/${o.label}`,
+            )
+            .join(" | ");
         break;
       }
       case "garmin_test": {
@@ -573,7 +607,7 @@ const defaultHandler = {
           headers: { "content-type": "application/gpx+xml", "content-disposition": `attachment; filename="trasa-${o.label}.gpx"` },
         });
       }
-      const title = `${name}: ${o.unpaved_pct}% nieutwardzonej, zieleń ${o.green_avg}/10, ${o.retrace_pct}% dwa razy`;
+      const title = `${name}: ${o.unpaved_pct}% nieutwardzonej, zieleń ${o.green_avg}/10, ${o.retrace_pct}% dwa razy${o.via ? `, przez ${o.via.join(", ")}` : ""}`;
       return new Response(mapPage(esc(title), o.coords, `/trasa/${p.id}/${o.label}.gpx`), { headers: html });
     }
     if (url.pathname === "/setup") return handleSetup(request, env, url.origin);
