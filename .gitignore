@@ -6,3 +6,4 @@ dist/
 *.log
 .DS_Store
 PATCH-PACKAGE-JSON.md
+.test-out/

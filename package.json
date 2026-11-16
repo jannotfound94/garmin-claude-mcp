@@ -9,7 +9,8 @@
     "lint:fix": "oxlint --fix",
     "start": "wrangler dev",
     "cf-typegen": "wrangler types",
-    "type-check": "tsc --noEmit"
+    "type-check": "tsc --noEmit",
+    "test": "esbuild test/diet.test.ts test/integration.test.ts --bundle --platform=node --format=esm --alias:cloudflare:workers=./test/cloudflare-workers-shim.mjs --out-extension:.js=.mjs --outdir=.test-out --log-level=warning && node --test .test-out/diet.test.mjs .test-out/integration.test.mjs"
   },
   "dependencies": {
     "@cloudflare/workers-oauth-provider": "^0.10.3",
@@ -20,6 +21,7 @@
   },
   "devDependencies": {
     "@types/node": "^26.2.0",
+    "esbuild": "^0.28.2",
     "oxfmt": "^0.56.0",
     "oxlint": "^1.71.0",
     "typescript": "6.0.3",
@@ -48,6 +50,9 @@
       },
       "ROUTINE_FIRE_TOKEN": {
         "description": "Optional, for the coach agent. Token of that API trigger."
+      },
+      "GEMINI_API_KEY": {
+        "description": "Optional, for the dietitian. Free key from aistudio.google.com (Get API key)."
       }
     }
   }

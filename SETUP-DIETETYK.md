@@ -1,0 +1,88 @@
+# Dietetyk: uruchomienie krok po kroku
+
+Dietetyk to dodatek do trenera biegowego: wysyłasz bota na Telegramie zdjęcie posiłku (z notatką albo bez), a on liczy kalorie i makroskładniki, zestawia je z celem na dany dzień treningowy i ze spalaniem z Garmina, przypomina o brakujących posiłkach i raz dziennie podsumowuje. Działa na tym samym bocie, serwerze i pamięci co trener. Całość zajmuje ok. 10 minut.
+
+> **Bezpieczeństwo.** Klucz Gemini wklejasz **tylko** w Cloudflare (sekrety). Nigdy w rozmowę z Claude ani w Telegram.
+
+## Jak to działa
+
+| Zadanie | Kto to robi | Koszt |
+| --- | --- | --- |
+| Rozpoznanie zdjęcia, szacowanie gramatury i makro | **Gemini** (z serwera, od razu po wysłaniu zdjęcia) | darmowy poziom API |
+| Sumy, cele dnia, bilans, trend wagi, przypomnienia | **zwykły kod** na serwerze (bez AI, dlatego liczby są powtarzalne) | 0 zł |
+| Podsumowanie dnia i tygodnia, rady, rozmowa o jedzeniu | **Claude** (ten sam trener, widzi dane z Garmina i plan treningowy) | w ramach Twojego planu Claude |
+
+Dzięki temu zużycie jest rozłożone na dwie platformy, a Claude nie traci tokenów na oglądanie każdego zdjęcia.
+
+**Ważne: abonament „Gemini Pro” (Google AI Pro) to nie to samo co API.** Serwer potrzebuje osobnego klucza API z Google AI Studio. Ma on własny, darmowy poziom (limity zmieniają się, aktualne sprawdzisz w AI Studio). Zwykle wystarcza na kilkanaście zdjęć dziennie. Dwie rzeczy do wiedzy: (1) na poziomie darmowym Google może wykorzystywać przesyłane dane do ulepszania produktów; zdjęcia jedzenia nie są wrażliwe, ale jeśli Ci to przeszkadza, włącz rozliczanie w projekcie AI Studio (płatny poziom, koszt to grosze za zdjęcie, a dane nie są wtedy używane do trenowania); (2) po przekroczeniu limitu bot dostaje błąd i odpowiada, że się nie udało. Możesz wtedy wpisać posiłek tekstem po chwili.
+
+## Krok 1. Klucz Gemini (2 minuty)
+
+1. Wejdź na <https://aistudio.google.com/apikey> (zaloguj się kontem Google).
+2. Kliknij **Create API key** i skopiuj klucz.
+
+## Krok 2. Wgraj kod i wpisz klucz w Cloudflare (3 minuty)
+
+1. Zmiany dietetyka są w gałęzi `claude/dietitian-agent` repozytorium. Scal je do głównej gałęzi (Pull request → Merge). Cloudflare wdroży zmiany sam, jeśli serwer był utworzony przyciskiem „Deploy to Cloudflare”. Jeśli wdrażasz ręcznie: `npm install && npm run deploy`.
+2. Cloudflare → **Workers & Pages** → Twój serwer (`garmin-claude-mcp`) → **Settings** → **Variables and Secrets** → **Add** → typ **Secret**:
+   - nazwa: `GEMINI_API_KEY`, wartość: skopiowany klucz → **Deploy**.
+3. (Opcjonalnie) zmienne zwykłe `GEMINI_MODEL` i `GEMINI_FALLBACK_MODEL`, jeśli chcesz podmienić modele. Domyślnie: `gemini-2.5-flash` (główny) i `gemini-2.5-flash-lite` (zapasowy, gdy główny wyczerpie limit lub jest niedostępny). Jeśli Google wycofa model, wpisz tu nazwę aktualnego z AI Studio, bez zmiany kodu.
+
+## Krok 3. Odśwież webhook i sprawdź Gemini (1 minuta)
+
+1. Otwórz stronę `https://TWÓJ-SERWER.workers.dev/setup`, wpisz hasło (`MCP_PASSWORD`).
+2. W sekcji „Dietetyk” kliknij **Sprawdź Gemini**. Powinien pojawić się komunikat „Gemini działa ✅”.
+3. Kliknij u góry **1. Podłącz Telegram (webhook)**. **Zrób to także, jeśli trener już działał**: dietetyk używa przycisków pod wiadomościami, a Telegram wysyła ich kliknięcia dopiero po ponownym ustawieniu webhooka.
+
+## Krok 4. Odśwież konektor w Claude (1 minuta)
+
+W claude.ai: Settings → Connectors → konektor z serwerem → odśwież listę narzędzi (albo odłącz i połącz ponownie). Pojawią się dwa nowe narzędzia: `getNutrition` i `setNutritionConfig`. Prompt zaplanowanego zadania „Trener (agent)” nie wymaga zmian: zasady dietetyka dochodzą przez `getCoachContext` z pliku `coach/TRENER.md`.
+
+## Krok 5. Ustawienia w Telegramie (2 minuty)
+
+Wyślij botowi kolejno:
+
+```
+/waga 82,5
+/posilki śniadanie 07:30; obiad 13:30; kolacja 19:30
+/posilki weekend śniadanie 09:00; obiad 14:00; kolacja 19:30
+/cel
+```
+
+- `/waga`: bez wagi nie ma celów (liczone są w gramach na kg masy ciała). Waż się 2–3 razy w tygodniu, najlepiej rano.
+- `/posilki`: godziny, o których zwykle jesz. Dodaj tyle posiłków, ile chcesz (do 10, także przekąski, np. `podwieczorek 16:30`). Przypomnienie przychodzi, jeśli **3 godziny po planowanej godzinie** nie ma wpisu (zmiana: `/cel przypomnienie 120`). Pierwsze przypomnienie ma przyciski: 📸 Dodam / ⏭ Pominąłem / ⏰ Za godzinę (po godzinie przyjdzie jedno ostatnie przypomnienie, potem cisza). Przypomnienia nie przychodzą po 22:00 i przed 6:00.
+- `/cel`: pokazuje cele dla każdego typu dnia. Domyślnie: białko 1,8 g/kg, tłuszcz 1,0 g/kg, węglowodany od 3,5 g/kg (dzień bez biegu) do 7 g/kg (długi bieg), **bez deficytu** (utrzymanie wagi). Zmiany: `/cel deficyt 300`, `/cel bialko 2`, `/cel wegle dlugi 8`.
+
+## Codzienne używanie
+
+| Chcesz | Zrób |
+| --- | --- |
+| Zapisać posiłek | wyślij **zdjęcie**; podpis pod zdjęciem to notatka („połowa porcji”, „150 g”, „na oliwie”, „zjadłem o 8:15”) |
+| Zapisać bez zdjęcia | `/jem 2 jajka, kromka chleba, masło` albo po prostu „zjadłem …” / „na kolację …” |
+| Poprawić wpis | **odpowiedz** (Telegram: „Odpowiedz”) na wiadomość bota z tym posiłkiem, np. „to było 200 g”, „bez sosu”, „to skyr naturalny” |
+| Usunąć wpis | przycisk 🗑 pod wiadomością albo `/usun 2` (numer z `/dzis`) |
+| Szybko dodać to, co jesz często | po zapisaniu stuknij ⭐ **Ulubione**; potem `/ulubione` i jedno stuknięcie |
+| Zobaczyć dzień | `/dzis` lub `/dzis wczoraj`: posiłki, cele, ile zostało, spalanie z Garmina |
+| Wyłączyć przypomnienia (urlop) | `/przypomnienia off` |
+| Zobaczyć pomoc | `/dieta` |
+
+Gdy model nie jest pewny składnika, który wyraźnie zmienia wynik, zadaje jedno pytanie pod posiłkiem. Posiłek jest już wtedy zapisany; odpowiedź na pytanie (jako „Odpowiedz” na tę wiadomość) go poprawia. Pozycje oznaczone (?) są szacunkiem o niskiej pewności, 🏷 oznacza wartości z etykiety lub z bazy Open Food Facts (gdy na zdjęciu jest kod kreskowy pojedynczego produktu).
+
+## Co dostajesz od trenera
+
+- **Wieczorem ok. 21:30**: krótkie podsumowanie dnia (jedzenie vs cel, paliwo względem treningu, jedna uwaga na jutro).
+- **W niedzielę ok. 21:30**: osobna wiadomość z podsumowaniem tygodnia (spożycie vs trend wagi, białko na kg, dni długie vs odpoczynek).
+- **Po ok. 3–4 tygodniach** (min. 14 zapisanych dni i 4 ważenia): trener potrafi wyliczyć Twoje rzeczywiste dzienne zapotrzebowanie z bilansu i wagi i porównać je z tym, co pokazuje Garmin. To najcenniejsza część systemu, bo kalorie Garmina bywają zawyżone.
+- Możesz po prostu pisać do trenera: „co zjeść po dzisiejszym biegu?”, „chcę zrzucić 3 kg do kwietnia”. Odpowiada na podstawie tego, co dziś zjadłeś i co jest w planie.
+
+## Jak to liczy cele
+
+Cele dnia = masa ciała × gramy na kg, zależnie od typu dnia, który serwer ustala z kalendarza intervals.icu i z tego, co faktycznie zrobiłeś (bierze cięższą wersję): dzień bez biegu, łatwy bieg, akcent (tempo/interwały) albo długi bieg (od 16 km lub 100 min, albo „długi” w nazwie). Deficyt (jeśli go ustawisz) obowiązuje tylko w dni bez biegu i łatwe, kosztem węglowodanów, nigdy białka, a węglowodany nie spadają poniżej 2,5 g/kg.
+
+## Rozwiązywanie problemów
+
+- **Bot milczy po zdjęciu**: sprawdź na `/setup`, czy Gemini działa. Błąd 429 = limit darmowego poziomu (poczekaj lub włącz rozliczanie); 404 = nazwa modelu jest nieaktualna, wpisz nową w `GEMINI_MODEL`.
+- **Przyciski nic nie robią**: kliknij ponownie „Podłącz Telegram” na `/setup` (Krok 3.3).
+- **Brak celów**: wpisz `/waga`.
+- **Brak narzędzi `getNutrition` w Claude**: odśwież konektor (Krok 4).
+- **Dane pamięta serwer** (Durable Object na Cloudflare); zdjęć nie przechowuje, tylko wyniki. Zdjęcie trafia na chwilę do Gemini, nic poza tym.

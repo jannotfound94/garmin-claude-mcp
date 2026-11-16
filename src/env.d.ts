@@ -10,6 +10,10 @@ interface CoachEnv {
   ROUTINE_FIRE_TOKEN?: string;
   GARMIN_PERSONAL_API_KEY?: string;
   ORS_API_KEY?: string;
+  // Dietetyk (opcjonalny): darmowy klucz z Google AI Studio. Modele można podmienić bez zmiany kodu.
+  GEMINI_API_KEY?: string;
+  GEMINI_MODEL?: string;
+  GEMINI_FALLBACK_MODEL?: string;
   OAUTH_KV: KVNamespace;
   MCP_OBJECT: DurableObjectNamespace;
   COACH_STATE: DurableObjectNamespace<import("./state").CoachState>;

@@ -173,6 +173,22 @@ export class GarminPersonal {
     return [...byDate.values()].sort((a, b) => String(a.data).localeCompare(String(b.data))).map(clean);
   }
 
+  /**
+   * Energy burned per day from the daily summary (calories.burnedResting / burnedActive / burnedTotal; verified
+   * against the live API). Today's numbers are partial until the day ends. Max 14 days per call.
+   */
+  async energy(start: string, end: string): Promise<Record<string, { resting: number | null; active: number | null; total: number | null }>> {
+    const daily: any = await this.get("/usersummary-service/v2/dailysummaries", { startDate: start, endDate: end });
+    const out: Record<string, { resting: number | null; active: number | null; total: number | null }> = {};
+    const n = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : null);
+    for (const d of asArray(daily?.data ?? daily)) {
+      if (!d?.calendarDate) continue;
+      const c = d.calories ?? {};
+      out[d.calendarDate] = { resting: n(c.burnedResting), active: n(c.burnedActive), total: n(c.burnedTotal) };
+    }
+    return out;
+  }
+
   /** VO2max over the last weeks and fitness age. */
   async fitness(start: string, end: string) {
     const safe = (p: Promise<unknown>) => p.then(prune).catch((e) => ({ error: String(e).slice(0, 200) }));

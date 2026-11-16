@@ -74,6 +74,8 @@ You will see a password page. Enter your `MCP_PASSWORD`. Once connected on web, 
 | `getWeather` | Open-Meteo forecast per day and run window (best start hour, verdict dobra/znosna/zla) for moving runs to better days |
 | `proposeRoutes` | Two running loops of a given length. Loops are routed through parks, woods and soft-surface paths found in OpenStreetMap (Overpass, cached 30 days), measured for length, surface, greenery and out-and-back share; OpenRouteService round trips are the fallback |
 | `chooseRoute` | Sends the chosen loop as GPX on Telegram |
+| `getNutrition` | Dietitian: meals logged from Telegram photos, targets by day type, intake vs. Garmin burn, weight trend, TDEE calibration |
+| `setNutritionConfig` | Dietitian: deficit, protein/fat/carb targets, reminder delay |
 | `getCoachContext` | Coach agent: instructions, memory, conversation, data snapshot |
 | `sendMessage` | Coach agent: sends a Telegram message |
 | `updateMemory` | Coach agent: notes, open items, self-scheduled check-ins |
@@ -83,6 +85,10 @@ Activity, wellness and event tools now return compact objects (pass `raw: true` 
 ## Running coach agent
 
 See [SETUP-TRENER.md](SETUP-TRENER.md) (Polish). The worker receives Telegram messages, watches for new runs every 15 minutes and wakes a Claude Code scheduled task through its API trigger. Coach rules live in [coach/TRENER.md](coach/TRENER.md).
+
+### Dietitian (calories and macros)
+
+Send the bot a photo of a meal (caption = note). Gemini (free AI Studio key) recognises it and estimates macros; the worker totals them, sets targets by training-day type, reminds you about missing meals and compares intake with Garmin's burned calories. Claude writes the daily and weekly summaries. See [SETUP-DIETETYK.md](SETUP-DIETETYK.md) (Polish). Run the tests with `npm test`.
 
 Garmin Connect data uses Garmin's official Personal API: create a Personal API key in Garmin Connect Web (valid one year) and store it as the `GARMIN_PERSONAL_API_KEY` secret. The worker exchanges it for short-lived bearer tokens (same flow as Garmin's [connect-personal-api-python](https://github.com/garmin/connect-personal-api-python)).
 
