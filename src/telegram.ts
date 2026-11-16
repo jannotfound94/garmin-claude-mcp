@@ -1,5 +1,7 @@
 /** Telegram Bot API, called directly (no Composio). */
 
+import { AWAY_KM, NEAR_HOME_KM, distKm } from "./location";
+
 const API = "https://api.telegram.org";
 
 export async function tg(env: Env, method: string, body: unknown): Promise<any> {
@@ -14,6 +16,12 @@ export async function tg(env: Env, method: string, body: unknown): Promise<any> 
   return json.result;
 }
 
+/** One standing button under the input field: one tap shares the phone's location (Telegram asks for permission). */
+const LOCATION_KEYBOARD = {
+  keyboard: [[{ text: "📍 Jestem gdzie indziej", request_location: true }]],
+  resize_keyboard: true,
+};
+
 export async function sendTelegram(env: Env, text: string) {
   if (!env.TELEGRAM_CHAT_ID) throw new Error("Brak TELEGRAM_CHAT_ID");
   // Telegram limit is 4096 chars per message.
@@ -27,7 +35,13 @@ export async function sendTelegram(env: Env, text: string) {
     parts.push(rest.slice(0, cut));
     rest = rest.slice(cut).trim();
   }
-  for (const p of parts) await tg(env, "sendMessage", { chat_id: env.TELEGRAM_CHAT_ID, text: p });
+  for (const [i, p] of parts.entries()) {
+    await tg(env, "sendMessage", {
+      chat_id: env.TELEGRAM_CHAT_ID,
+      text: p,
+      ...(i === parts.length - 1 ? { reply_markup: LOCATION_KEYBOARD } : {}),
+    });
+  }
 }
 
 /** Secret Telegram must send back with every webhook call. Derived, so there is one less secret to set. */
@@ -59,7 +73,17 @@ export async function handleTelegramWebhook(request: Request, env: Env): Promise
     await coach(env).setLastLocation({ lat: msg.location.latitude, lon: msg.location.longitude, at });
     // Live-location updates arrive as edits every few seconds: store, but don't wake the coach.
     if (update.edited_message) return new Response("ok");
-    text = "[Jan udostępnił swoją lokalizację: trasy na najbliższe 3 godziny startują z tego miejsca]";
+    const { home } = await coach(env).getRouteSettings();
+    const d = home ? distKm(home, { lat: msg.location.latitude, lon: msg.location.longitude }) : null;
+    const km = d === null ? "" : `${Math.round(d * 10) / 10} km od domu`;
+    text =
+      d === null
+        ? "[Jan udostępnił swoją lokalizację]"
+        : d < NEAR_HOME_KM
+          ? `[Jan udostępnił lokalizację (${km}), czyli jest w domu: pogodę i trasy liczysz dla domu]`
+          : d >= AWAY_KM
+            ? `[Jan udostępnił lokalizację (${km}), czyli jest poza domem: pogodę i trasy liczysz dla tego miejsca przez 48 godzin; potwierdź mu to jednym zdaniem]`
+            : `[Jan udostępnił lokalizację (${km}), w okolicy domu: pogodę i trasy liczysz dla tego miejsca przez 12 godzin]`;
   }
   if (!text) {
     if (msg.voice) text = "[Jan wysłał wiadomość głosową; trener jej nie odsłuchuje, poproś o tekst]";

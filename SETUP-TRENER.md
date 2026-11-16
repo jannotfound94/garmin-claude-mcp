@@ -138,7 +138,7 @@ Klucz jest ważny rok. Po roku utwórz nowy w Garmin Connect i podmień wartoś�
 
 Trasy układają się przez parki, lasy i ścieżki gruntowe wokół punktu startu. Dane o nich pochodzą z OpenStreetMap (publiczny serwer Overpass, bez klucza) i są pobierane raz dla danego miejsca, a potem pamiętane przez 30 dni, więc pierwsze generowanie trwa dłużej. Gdy serwer nie odpowiada, trener korzysta z pętli OpenRouteService. Do serwerów Overpass i OpenRouteService trafia Twój punkt startu.
 
-Gdy chcesz wystartować z innego miejsca, udostępnij trenerowi lokalizację w Telegramie (spinacz → Lokalizacja). Przez 3 godziny trasy będą startować stamtąd.
+Domyślnie pogoda i trasy liczą się dla domu. Pod polem wpisywania w Telegramie jest stały przycisk **„📍 Jestem gdzie indziej”**: jedno stuknięcie wysyła Twoją lokalizację (Telegram poprosi o zgodę). W okolicy domu obowiązuje ona 12 godzin, a poza domem (od 20 km) 48 godzin, potem wraca dom. Zapamiętywana jest tylko ostatnia pozycja, bez historii, i można ją usunąć na `/setup` przyciskiem **Usuń zapamiętaną lokalizację**. Możesz też udostępnić lokalizację ręcznie (spinacz, Lokalizacja).
 
 ## Krok 6c. Pogoda (nic do założenia, tylko punkt startu)
 

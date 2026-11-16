@@ -30,7 +30,7 @@ export function anchorRadiusM(targetKm: number): number {
 }
 
 export function overpassQuery(lat: number, lon: number, radiusM: number): string {
-  const a = `(around:${radiusM},${lat.toFixed(5)},${lon.toFixed(5)})`;
+  const a = `(around:${radiusM},${lat.toFixed(3)},${lon.toFixed(3)})`; // ~100 m is enough for a 2.5+ km search
   const open = `["access"!~"^(private|no)$"]`;
   return (
     `[out:json][timeout:25];(` +

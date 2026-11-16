@@ -6,6 +6,7 @@ import TRENER from "../coach/TRENER.md";
 import { Icu, compactActivity, compactEvent, compactIntervals, compactWellness, computeSplits } from "./icu";
 import { GarminPersonal, capJson } from "./garmin";
 import { runScheduler } from "./scheduler";
+import { distKm, resolveLocation } from "./location";
 import { fetchForecast } from "./weather";
 import { geocode, mapPage, proposeLoops, toGpx } from "./routes";
 import { type Anchor, anchorRadiusM, fetchAnchors } from "./parks";
@@ -22,10 +23,14 @@ function garminClient(env: Env): GarminPersonal | null {
   return new GarminPersonal(env.GARMIN_PERSONAL_API_KEY, () => state.getGarminToken(), (t) => state.setGarminToken(t));
 }
 
-/** Weather is judged for home (or the last shared location when there is no home). */
-async function weatherLocation(env: Env) {
+/** Home by default; a location shared on Telegram overrides it for a while (see location.ts). */
+async function currentLocation(env: Env) {
   const { home, last } = await coach(env).getRouteSettings();
-  return home ?? last ?? null;
+  return resolveLocation(home, last);
+}
+
+async function weatherLocation(env: Env) {
+  return (await currentLocation(env))?.point ?? null;
 }
 
 /**
@@ -227,15 +232,16 @@ export class MyMCP extends McpAgent<Env> {
 
     this.server.tool(
       "proposeRoutes",
-      "Generate two running loops (A and B) of the given length from Jan's start point (shared Telegram location from the last 3 h, otherwise home), preferring unpaved paths, parks and greenery. Returns stats and links to a map with a GPX download. Send Jan both options and ask him to choose.",
+      "Generate two running loops (A and B) of the given length from Jan's start point (home, or the location he shared on Telegram if it is still valid, see lokalizacja in getCoachContext), preferring unpaved paths, parks and greenery. Returns stats and links to a map with a GPX download. Send Jan both options and ask him to choose.",
       { distanceKm: z.number().min(2).max(42).describe("Total distance of today's run, km") },
       async ({ distanceKm }) => {
         if (!this.env.ORS_API_KEY) return text("Trasy niedostępne: brak sekretu ORS_API_KEY.");
         const state = coach(this.env);
-        const { home, last, origin } = await state.getRouteSettings();
-        const recent = last && Date.now() - Date.parse(last.at) < 3 * 3600_000 ? last : null;
-        const start = recent ?? home;
-        if (!start) return text("Trasy niedostępne: brak punktu startu (ustaw adres domowy na stronie /setup albo poproś Jana o udostępnienie lokalizacji).");
+        const { origin } = await state.getRouteSettings();
+        const loc = await currentLocation(this.env);
+        if (!loc) return text("Trasy niedostępne: brak punktu startu (ustaw adres domowy na stronie /setup albo poproś Jana o udostępnienie lokalizacji).");
+        const start = loc.point;
+        const fromHome = loc.kind === "dom";
         const { anchors, info } = await loadAnchors(this.env, start, distanceKm);
         const options = await proposeLoops(this.env.ORS_API_KEY, start, distanceKm, anchors);
         const id = crypto.randomUUID().replace(/-/g, "").slice(0, 16);
@@ -244,13 +250,14 @@ export class MyMCP extends McpAgent<Env> {
           created: new Date().toISOString(),
           target_km: distanceKm,
           start,
-          start_label: recent ? "udostępniona lokalizacja" : "dom",
+          start_label: fromHome ? "dom" : "udostępniona lokalizacja",
           options,
         });
         const base = origin ?? "";
         return text({
           proposalId: id,
-          start: recent ? "udostępniona lokalizacja Jana" : "dom",
+          start: fromHome ? "dom" : "udostępniona lokalizacja Jana",
+          poza_domem: loc.poza_domem,
           opcje: options.map((o) => ({
             trasa: o.label,
             dystans_km: o.distance_km,
@@ -347,6 +354,15 @@ export class MyMCP extends McpAgent<Env> {
             garmin_regeneracja_4_dni: val(garminToday, (x) => x),
             pogoda_4_dni: val(weather, (x) => x),
           },
+          lokalizacja: await (async () => {
+            const l = await currentLocation(this.env);
+            if (!l) return "brak punktu startu";
+            return {
+              punkt_startu: l.kind === "dom" ? "dom" : "udostępniona lokalizacja",
+              poza_domem: l.poza_domem,
+              ...(l.kind === "udostepniona" ? { od_domu_km: l.od_domu_km, udostepniona_godz_temu: l.udostepniona_godz_temu } : {}),
+            };
+          })(),
           telegram_skonfigurowany: Boolean(this.env.TELEGRAM_BOT_TOKEN && this.env.TELEGRAM_CHAT_ID),
           trasy: await (async () => {
             const { home, last } = await coach(this.env).getRouteSettings();
@@ -367,7 +383,7 @@ export class MyMCP extends McpAgent<Env> {
 
     this.server.tool(
       "sendMessage",
-      "Send a Telegram message to Jan (plain text, Polish). The message is saved in the conversation history.",
+      "Send a Telegram message to Jan (plain text, Polish). The message is saved in the conversation history. Under the input field Jan always has a button '📍 Jestem gdzie indziej' that shares his location with one tap, so you can point to it.",
       { text: z.string().min(1) },
       async ({ text: msg }) => {
         await sendTelegram(this.env, msg);
@@ -482,12 +498,18 @@ async function garminSection(env: Env, password: string) {
 
 async function routesSection(env: Env, password: string) {
   const hidden = `<input type="hidden" name="password" value="${esc(password)}">`;
-  const { home } = await coach(env).getRouteSettings();
-  return `<h3>Trasy</h3>
+  const { home, last } = await coach(env).getRouteSettings();
+  const loc = resolveLocation(home, last);
+  const lastInfo = last
+    ? `${esc(fmtWarsaw(last.at))}${home ? `, ${Math.round(distKm(home, last) * 10) / 10} km od domu` : ""}`
+    : "brak";
+  return `<h3>Trasy i lokalizacja</h3>
   <ul><li>${env.ORS_API_KEY ? "✅" : "❌"} ORS_API_KEY (darmowy klucz z openrouteservice.org)</li>
-  <li>${home ? `✅ Punkt startu (dom): ${esc(home.label)}` : "❌ Brak punktu startu (dom)"}</li></ul>
+  <li>${home ? `✅ Punkt startu (dom): ${esc(home.label)}` : "❌ Brak punktu startu (dom)"}</li>
+  <li>Teraz pogoda i trasy liczone są dla: ${loc ? (loc.kind === "dom" ? "domu" : "udostępnionej lokalizacji") : "nic (brak punktu startu)"}</li>
+  <li>Ostatnia udostępniona lokalizacja: ${lastInfo}</li></ul>
   <form method="post">${hidden}<input name="home_address" placeholder="Adres lub współrzędne startu, np. 52.2500, 21.0000" style="width:100%;padding:.5rem;margin-bottom:.5rem">
-  ${btn("set_home", "Zapisz punkt startu")} ${btn("routes_test", "Wygeneruj testowe trasy 5 km")} ${btn("weather_test", "Sprawdź pogodę")}</form>`;
+  ${btn("set_home", "Zapisz punkt startu")} ${btn("routes_test", "Wygeneruj testowe trasy 5 km")} ${btn("weather_test", "Sprawdź pogodę")} ${btn("clear_location", "Usuń zapamiętaną lokalizację")}</form>`;
 }
 
 async function handleSetup(request: Request, env: Env, origin: string): Promise<Response> {
@@ -536,9 +558,12 @@ async function handleSetup(request: Request, env: Env, origin: string): Promise<
         notice = `Punkt startu zapisany: ${h.label} (${h.lat.toFixed(5)}, ${h.lon.toFixed(5)}).`;
         break;
       }
+      case "clear_location":
+        await coach(env).clearLastLocation();
+        notice = "Zapamiętana lokalizacja usunięta. Używany jest dom.";
+        break;
       case "weather_test": {
-        const { home, last } = await coach(env).getRouteSettings();
-        const loc = home ?? last;
+        const loc = (await currentLocation(env))?.point;
         if (!loc) throw new Error("Najpierw zapisz punkt startu.");
         const days = await fetchForecast(loc.lat, loc.lon, 3);
         notice =

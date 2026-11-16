@@ -217,6 +217,9 @@ export class CoachState extends DurableObject<Env> {
   async setLastLocation(l: LatLon & { at: string }) {
     await this.ctx.storage.put("lastLocation", l);
   }
+  async clearLastLocation() {
+    await this.ctx.storage.delete("lastLocation");
+  }
   async setOrigin(origin: string) {
     if ((await this.ctx.storage.get<string>("origin")) !== origin) await this.ctx.storage.put("origin", origin);
   }
