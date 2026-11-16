@@ -43,6 +43,9 @@ export async function obtainToken(apiKey: string): Promise<GarminToken> {
  * Keeps scalar fields and short lists; drops nulls and long time series (e.g. per-minute stress or
  * body-battery samples) so responses stay small enough for the coach.
  */
+// Fields that are noise for a coach: Garmin's "optimal range" metadata, internal ids, raw timestamps.
+const NOISE_KEY = /^(optimal|ideal)|PK$|^id$|^userProfile|Gmt$|TimestampGMT$|^deviceId$|^uuid$/i;
+
 export function prune(v: unknown, depth = 0): unknown {
   if (v === null || v === undefined) return undefined;
   if (Array.isArray(v)) {
@@ -54,6 +57,7 @@ export function prune(v: unknown, depth = 0): unknown {
     if (depth > 5) return undefined;
     const out: Record<string, unknown> = {};
     for (const [k, x] of Object.entries(v as Record<string, unknown>)) {
+      if (NOISE_KEY.test(k)) continue;
       const p = prune(x, depth + 1);
       if (p !== undefined) out[k] = p;
     }
@@ -99,7 +103,14 @@ export class GarminPersonal {
       safe(this.get("/wellness-service/wellness/bodyBattery/reports/daily", { startDate: start, endDate: end })),
       safe(this.get("/usersummary-service/v2/dailysummaries", { startDate: start, endDate: end })),
     ]);
-    return { okres: `${start}..${end}`, sen: sleep, hrv, stres: stress, body_battery: bodyBattery, podsumowanie_dnia: daily };
+    return {
+      okres: `${start}..${end}`,
+      sen: budget(sleep),
+      hrv: budget(hrv),
+      stres: budget(stress),
+      body_battery: budget(bodyBattery),
+      podsumowanie_dnia: budget(daily),
+    };
   }
 
   /** VO2max over the last weeks and fitness age. */
@@ -111,6 +122,12 @@ export class GarminPersonal {
     ]);
     return { okres: `${start}..${end}`, vo2max, wiek_sprawnosci: fitnessAge };
   }
+}
+
+/** Each data section gets its own size budget, so a verbose one (sleep) cannot crowd out the others. */
+function budget(v: unknown, max = 2500): unknown {
+  const s = JSON.stringify(v);
+  return s && s.length > max ? `${s.slice(0, max)}… [obcięto]` : v;
 }
 
 /** Caps a JSON payload so one tool result cannot flood the coach's context. */
