@@ -71,6 +71,7 @@ You will see a password page. Enter your `MCP_PASSWORD`. Once connected on web, 
 | `getActivityDetails` | Per-km splits, stops and walking time for one activity |
 | `getGarminRecovery` | Garmin Connect Personal API: sleep, HRV, stress, Body Battery, daily summary |
 | `getGarminFitness` | Garmin Connect Personal API: VO2max, fitness age |
+| `getWeather` | Open-Meteo forecast per day and run window (best start hour, verdict dobra/znosna/zla) for moving runs to better days |
 | `proposeRoutes` | Two running loops (OpenRouteService) of a given length, preferring unpaved paths and greenery |
 | `chooseRoute` | Sends the chosen loop as GPX on Telegram |
 | `getCoachContext` | Coach agent: instructions, memory, conversation, data snapshot |
