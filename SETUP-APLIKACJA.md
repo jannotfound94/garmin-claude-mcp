@@ -74,7 +74,7 @@ Plan → „Trasa z opisu”: wpisz albo podyktuj (mikrofon klawiatury Gboard) o
 - szczegółowo: „z domu nad Wisłę przez Fort Sokolnickiego, plaża Żoliborz, ulica Kaniowa, park przy Cytadeli i do domu”,
 - luźno: „10 km, najpierw po tej stronie Wisły, Gdańskim na drugą stronę, powrót kładką”.
 
-Gemini rozbija opis na miejsca po kolei, miejsca są wyszukiwane na mapie (OpenStreetMap i geokoder OpenRouteService), a trasa idzie dokładnie przez nie. Przy podanym dystansie trasa jest wydłużana objazdem, najlepiej w miejscu wskazanym w opisie („po tej stronie Wisły” = przed pierwszym miejscem). Sprawdź listę „Rozpoznane punkty” i numerowane punkty na mapie: niepewnie rozpoznane są oznaczone. Jeśli coś jest źle, doprecyzuj opis (dzielnica, ulica, pełna nazwa) i wyznacz jeszcze raz. Trener ma do tego narzędzie `proposeRouteFromText`. Wymaga sekretów `ORS_API_KEY` i `GEMINI_API_KEY`.
+Gemini rozbija opis na miejsca po kolei, miejsca są wyszukiwane na mapie (OpenStreetMap i geokoder OpenRouteService), a trasa idzie dokładnie przez nie. Przy podanym dystansie trasa jest wydłużana objazdem, najlepiej w miejscu wskazanym w opisie („po tej stronie Wisły” = przed pierwszym miejscem). Sprawdź listę „Rozpoznane punkty” i numerowane punkty na mapie: niepewnie rozpoznane są oznaczone. Miejsca, których nie da się potwierdzić na mapie po nazwie, są pomijane z wyraźnym ostrzeżeniem (zamiast zgadywania innego miejsca), a gdy trasa omija wskazany punkt albo w dużej części biegnie tą samą drogą, dostajesz ostrzeżenie. Jeśli coś jest źle, doprecyzuj opis (dzielnica, ulica, pełna nazwa) i wyznacz jeszcze raz. Trener ma do tego narzędzie `proposeRouteFromText`. Wymaga sekretów `ORS_API_KEY` i `GEMINI_API_KEY`.
 
 ## Post przerywany
 

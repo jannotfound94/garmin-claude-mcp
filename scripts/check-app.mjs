@@ -34,5 +34,15 @@ if (missing.length) {
   console.error(`Brakujące ikony: ${missing.map((n) => `${n} (${[...new Set(used.get(n))].join(", ")})`).join("; ")}`);
   failed = true;
 }
+// Nagłówek Permissions-Policy nie może wyłączać funkcji, których aplikacja używa (z "geolocation=()" przeglądarka nawet nie pyta o zgodę).
+const headers = readFileSync(new URL("../_headers", dir), "utf8");
+for (const [api, usedBy] of [["geolocation", "push.js"], ["camera", "meals.js"]]) {
+  const uses = readFileSync(new URL(usedBy, dir), "utf8").includes(api === "camera" ? "capture" : "navigator.geolocation");
+  const m = new RegExp(`${api}=\\(([^)]*)\\)`).exec(headers);
+  if (uses && (!m || !/self/.test(m[1]))) {
+    console.error(`Permissions-Policy w public/_headers blokuje ${api}, a aplikacja go używa (${usedBy}). Ustaw ${api}=(self).`);
+    failed = true;
+  }
+}
 console.log(`Aplikacja: ${files.length} plików JS, ${defined.size} ikon, ${used.size} użytych nazw${failed ? ": BŁĘDY" : ": OK"}`);
 process.exit(failed ? 1 : 0);

@@ -100,6 +100,9 @@ export async function parseRequest(env: Env, text: string, context: string): Pro
 }
 
 // ---------------- 2. wyszukiwanie miejsc ----------------
+// Geokodery potrafią zwrócić "cokolwiek": dla nieznanej nazwy środek miasta albo inny park. Dlatego każdy kandydat
+// z trzech źródeł (OpenRouteService/Pelias, Photon, OpenStreetMap po nazwie) jest oceniany po tym, czy jego NAZWA
+// zawiera charakterystyczne słowa z opisu, a miejsca, których nie da się potwierdzić, są pomijane z ostrzeżeniem.
 
 const R = 6371000;
 export function distM(a: LatLon, b: LatLon): number {
@@ -111,11 +114,74 @@ export function distM(a: LatLon, b: LatLon): number {
 }
 const norm = (s: string) => s.toLowerCase().replace(/ł/g, "l").normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/[^a-z0-9 ]/g, " ").replace(/\s+/g, " ").trim();
 
-async function peliasSearch(apiKey: string, query: string, near: LatLon): Promise<{ lat: number; lon: number; found: string; confidence: number } | null> {
+/** Słowa, które nie wyróżniają miejsca (rodzaj obiektu, przyimki, miasto). */
+const GENERIC = new Set(["park", "parku", "ulica", "ul", "aleja", "al", "plac", "pl", "im", "imienia", "most", "mostu", "kladka", "kladki", "kladke", "bulwar", "bulwary", "bulwaru", "ogrod", "skwer", "nad", "pod", "przez", "do", "na", "w", "z", "i", "oraz", "warszawa", "warszawie", "warsaw", "polska", "poland", "gdansk", "krakow", "wroclaw", "poznan"]);
+
+export interface Tok {
+  raw: string; // małymi literami, z polskimi znakami (do wyrażenia regularnego w OSM)
+  n: string; // bez znaków diakrytycznych
+}
+const tokens = (s: string): Tok[] =>
+  s
+    .toLowerCase()
+    .split(/[^\p{L}\p{N}]+/u)
+    .filter((t) => t.length > 1)
+    .map((raw) => ({ raw, n: norm(raw) }));
+/** Słowa charakterystyczne: bez rodzajów obiektów; gdy nic nie zostaje, wszystkie. */
+export function distinctTokens(query: string): Tok[] {
+  const all = tokens(osmName(query));
+  const d = all.filter((t) => !GENERIC.has(t.n));
+  return d.length ? d : all;
+}
+/** Odmiany po polsku ("Gdańskim", "Traugutta"/"Traugutt"): zgodne, gdy równe albo mają wspólny początek (min. 5 liter). */
+const tokMatch = (a: string, b: string) => a === b || (Math.min(a.length, b.length) >= 4 && a.slice(0, 5) === b.slice(0, 5));
+
+export interface Scored {
+  score: number; // udział słów charakterystycznych z opisu znalezionych w nazwie kandydata
+  hasKey: boolean; // czy znaleziono najdłuższe (zwykle nazwisko lub właściwą nazwę) słowo
+  typeWords: boolean; // czy nazwa ma też rodzaj obiektu z opisu ("Most", "Park", "Bulwar"): odróżnia Most Gdański od Dworca Gdańskiego
+}
+const TYPE_WORDS = new Set(["park", "parku", "most", "mostu", "kladka", "kladki", "kladke", "bulwar", "bulwary", "bulwaru", "plac", "aleja", "ogrod", "skwer"]);
+export function scoreName(query: string, candidateName: string): Scored {
+  const want = distinctTokens(query);
+  if (!want.length) return { score: 0, hasKey: false, typeWords: false };
+  const have = tokens(candidateName).map((t) => t.n);
+  const types = tokens(osmName(query)).filter((t) => TYPE_WORDS.has(t.n));
+  const key = want.reduce((m, t) => (t.n.length > m.n.length ? t : m), want[0]);
+  const hit = want.filter((w) => have.some((h) => tokMatch(w.n, h)));
+  return { score: hit.length / want.length, hasKey: hit.includes(key), typeWords: types.every((t) => have.some((h) => tokMatch(t.n, h))) };
+}
+
+interface Cand {
+  lat: number;
+  lon: number;
+  name: string;
+  source: "ors" | "photon" | "osm";
+  typeOk: boolean; // rodzaj obiektu zgadza się z oczekiwanym (park, most, ulica)
+  genericOnly?: boolean;
+}
+
+/** Nazwa miejsca bez miasta i bez słów-ozdobników ("ulica", "ul."), do pokazania i do dopasowania. */
+export function osmName(query: string): string {
+  const first = query.split(",")[0].trim();
+  return first.replace(/^(ulica|ul\.?|aleja|al\.?|plac|pl\.?)\s+/i, "").replace(/[^\p{L}\p{N} .'\-]/gu, "").trim();
+}
+
+const KIND_LAYERS: Record<string, string> = {
+  street: "street,address,venue",
+  address: "address,street",
+  park: "venue,neighbourhood,street",
+  bridge: "venue,street",
+  area: "venue,neighbourhood,street",
+  place: "venue,street,neighbourhood",
+};
+
+async function peliasCands(apiKey: string, query: string, kind: string, near: LatLon): Promise<Cand[]> {
   const qs = new URLSearchParams({
     api_key: apiKey,
     text: query,
-    size: "5",
+    size: "8",
+    layers: KIND_LAYERS[kind] ?? "venue,street,neighbourhood",
     "focus.point.lat": String(near.lat),
     "focus.point.lon": String(near.lon),
     "boundary.circle.lat": String(near.lat),
@@ -123,67 +189,84 @@ async function peliasSearch(apiKey: string, query: string, near: LatLon): Promis
     "boundary.circle.radius": "40",
     "boundary.country": "PL",
   });
-  const res = await fetch(`${ORS}/geocode/search?${qs}`, { signal: AbortSignal.timeout(12000) });
-  if (!res.ok) return null;
+  const res = await fetch(`${ORS}/geocode/search?${qs}`, { signal: AbortSignal.timeout(10000) });
+  if (!res.ok) return [];
   const j: any = await res.json();
-  const f = (j.features ?? []).find((x: any) => Array.isArray(x?.geometry?.coordinates));
-  if (!f) return null;
-  const [lon, lat] = f.geometry.coordinates;
-  return { lat, lon, found: String(f.properties?.label ?? f.properties?.name ?? query).slice(0, 120), confidence: Number(f.properties?.confidence ?? 0) };
+  return (j.features ?? [])
+    .filter((f: any) => Array.isArray(f?.geometry?.coordinates))
+    .map((f: any): Cand => ({ lon: f.geometry.coordinates[0], lat: f.geometry.coordinates[1], name: String(f.properties?.name ?? f.properties?.label ?? ""), source: "ors", typeOk: true }));
 }
 
-/** Nazwa miejsca bez miasta i bez słów-ozdobników ("ulica", "ul."), do dopasowania w OpenStreetMap. */
-export function osmName(query: string): string {
-  const first = query.split(",")[0].trim();
-  return first.replace(/^(ulica|ul\.?|aleja|al\.?|plac|pl\.?)\s+/i, "").replace(/[^\p{L}\p{N} .'\-]/gu, "").trim();
+async function photonCands(query: string, near: LatLon): Promise<Cand[]> {
+  const qs = new URLSearchParams({ q: osmName(query), lat: String(near.lat), lon: String(near.lon), limit: "8" });
+  const res = await fetch(`https://photon.komoot.io/api/?${qs}`, { signal: AbortSignal.timeout(8000) });
+  if (!res.ok) return [];
+  const j: any = await res.json();
+  return (j.features ?? [])
+    .filter((f: any) => Array.isArray(f?.geometry?.coordinates))
+    .map((f: any): Cand => ({ lon: f.geometry.coordinates[0], lat: f.geometry.coordinates[1], name: String(f.properties?.name ?? f.properties?.street ?? ""), source: "photon", typeOk: true }));
 }
 
-async function osmByName(query: string, near: LatLon): Promise<{ lat: number; lon: number; found: string; exact: boolean } | null> {
-  const name = osmName(query);
-  if (name.length < 3) return null;
-  const esc = name.replace(/[.\\'^$*+?()[\]{}|-]/g, "\\$&");
-  const q = `[out:json][timeout:15];nwr["name"~"${esc}",i](around:25000,${near.lat},${near.lon});out center tags 25;`;
+const typeOk = (kind: string, t: Record<string, string>) =>
+  kind === "park" ? ["park", "garden", "nature_reserve", "common", "recreation_ground"].includes(t.leisure) || t.landuse === "forest" || t.natural === "wood"
+  : kind === "bridge" ? Boolean(t.bridge) || t.man_made === "bridge"
+  : kind === "street" || kind === "address" ? Boolean(t.highway)
+  : true;
+
+/** Jedno zapytanie do Overpass dla wszystkich miejsc naraz (łagodniej dla darmowych serwerów niż osobne). */
+async function osmCands(stops: { query: string; kind: string }[], near: LatLon): Promise<Cand[][]> {
+  const clauses = stops.map((s) => {
+    const key = distinctTokens(s.query).reduce<Tok | null>((m, t) => (!m || t.raw.length > m.raw.length ? t : m), null);
+    if (!key || key.raw.length < 4) return "";
+    const stem = (key.raw.length > 6 ? key.raw.slice(0, key.raw.length - 2) : key.raw).replace(/[.\\'^$*+?()[\]{}|-]/g, "\\$&");
+    return `nwr["name"~"${stem}",i](around:25000,${near.lat},${near.lon});`;
+  });
+  if (!clauses.some(Boolean)) return stops.map(() => []);
   let json: any;
   try {
-    json = (await queryOverpass(q, 14000, 3000)).json;
+    json = (await queryOverpass(`[out:json][timeout:15];(${clauses.join("")});out center tags 300;`, 14000, 3000)).json;
   } catch {
-    return null;
+    return stops.map(() => []);
   }
-  const target = norm(name);
-  const hits = (json.elements ?? [])
-    .map((e: any) => {
-      const lat = e.lat ?? e.center?.lat;
-      const lon = e.lon ?? e.center?.lon;
-      const nm = String(e.tags?.name ?? "");
-      return Number.isFinite(lat) && Number.isFinite(lon) && nm ? { lat, lon, nm, exact: norm(nm) === target, d: distM(near, { lat, lon }) } : null;
-    })
-    .filter(Boolean) as { lat: number; lon: number; nm: string; exact: boolean; d: number }[];
-  if (!hits.length) return null;
-  // dokładna nazwa wygrywa; w obrębie grupy najbliższe startowi
-  hits.sort((a, b) => Number(b.exact) - Number(a.exact) || a.d - b.d);
-  const h = hits[0];
-  return { lat: h.lat, lon: h.lon, found: h.nm, exact: h.exact };
+  const all: { lat: number; lon: number; tags: Record<string, string> }[] = (json.elements ?? [])
+    .map((e: any) => ({ lat: e.lat ?? e.center?.lat, lon: e.lon ?? e.center?.lon, tags: e.tags ?? {} }))
+    .filter((e: any) => Number.isFinite(e.lat) && Number.isFinite(e.lon));
+  return stops.map((s) =>
+    all.flatMap((e) => {
+      const names = [e.tags.name, e.tags["name:pl"], e.tags.alt_name, e.tags.official_name, e.tags.old_name].filter(Boolean);
+      return names.map((name): Cand => ({ lat: e.lat, lon: e.lon, name, source: "osm", typeOk: typeOk(s.kind, e.tags) }));
+    }),
+  );
 }
 
-export async function resolvePoint(apiKey: string, query: string, kind: string, near: LatLon): Promise<ResolvedPoint | null> {
-  const viaOsm = async (): Promise<ResolvedPoint | null> => {
-    const o = await osmByName(query, near);
-    return o ? { name: osmName(query) || query, query, lat: o.lat, lon: o.lon, kind, confidence: o.exact ? "high" : "low", found: o.found } : null;
-  };
-  const viaOrs = async (): Promise<ResolvedPoint | null> => {
-    const p = await peliasSearch(apiKey, query, near).catch(() => null);
-    return p ? { name: osmName(query) || query, query, lat: p.lat, lon: p.lon, kind, confidence: p.confidence >= 0.6 ? "high" : "low", found: p.found } : null;
-  };
-  // Mosty, parki i miejsca ma lepiej OpenStreetMap po nazwie; ulice i adresy geokoder.
-  const order = kind === "street" || kind === "address" ? [viaOrs, viaOsm] : [viaOsm, viaOrs];
-  let best: ResolvedPoint | null = null;
-  for (const f of order) {
-    const r = await f();
-    if (!r) continue;
-    if (r.confidence === "high") return r;
-    best ??= r;
-  }
-  return best;
+/** Wybiera najlepszego kandydata: musi nazywać się podobnie do opisu, potem pasujący rodzaj, potem najbliższy startowi. */
+export function pickCandidate(query: string, kind: string, cands: Cand[], near: LatLon, maxKm = 40): ResolvedPoint | null {
+  const onlyGeneric = tokens(osmName(query)).every((t) => GENERIC.has(t.n)); // np. samo "kładka": wiemy tylko, jakiego rodzaju ma być miejsce
+  const scored = cands
+    .map((c) => {
+      const sc = scoreName(query, c.name);
+      const d = distM(near, c);
+      return { c, sc, d };
+    })
+    .filter(({ sc, d }) => d <= maxKm * 1000 && (sc.score >= 0.6 || (sc.hasKey && sc.score > 0)))
+    .sort((a, b) => b.sc.score - a.sc.score || Number(b.sc.typeWords) - Number(a.sc.typeWords) || Number(b.c.typeOk) - Number(a.c.typeOk) || Number(b.sc.hasKey) - Number(a.sc.hasKey) || a.d - b.d);
+  const best = scored[0];
+  if (!best) return null;
+  return { name: osmName(query) || query, query, lat: best.c.lat, lon: best.c.lon, kind, confidence: best.sc.score >= 0.99 && best.d < 35000 && !onlyGeneric ? "high" : "low", found: best.c.name };
+}
+
+/** Rozpoznaje wszystkie miejsca z opisu; nie rozpoznane (albo tylko "zgadnięte") zostają null. */
+export async function resolveStops(apiKey: string, stops: { query: string; kind: string }[], near: LatLon): Promise<(ResolvedPoint | null)[]> {
+  const [osm, rest] = await Promise.all([
+    osmCands(stops, near).catch(() => stops.map(() => [] as Cand[])),
+    Promise.all(
+      stops.map(async (s) => {
+        const [p, f] = await Promise.allSettled([peliasCands(apiKey, s.query, s.kind, near), photonCands(s.query, near)]);
+        return [...(p.status === "fulfilled" ? p.value : []), ...(f.status === "fulfilled" ? f.value : [])];
+      }),
+    ),
+  ]);
+  return stops.map((s, i) => pickCandidate(s.query, s.kind, [...osm[i], ...rest[i]], near));
 }
 
 async function areaLabel(apiKey: string, p: LatLon): Promise<string> {
@@ -268,20 +351,19 @@ export async function planTextRoute(env: { ORS_API_KEY: string } & Env, start: L
   const warnings: string[] = parsed.unsupported.length ? [`Tego jeszcze nie uwzględniam: ${parsed.unsupported.join("; ")}.`] : [];
 
   const home = (name: string): ResolvedPoint => ({ name, query: name, lat: start.lat, lon: start.lon, kind: "start", confidence: "high", found: name });
-  const [startPt, endPt, ...stopPts] = await Promise.all([
-    parsed.start ? resolvePoint(key, parsed.start, "place", start) : Promise.resolve(home("Start")),
-    parsed.end ? resolvePoint(key, parsed.end, "place", start) : Promise.resolve(null),
-    ...parsed.stops.map((s) => resolvePoint(key, s.query, s.kind, start)),
-  ]);
-  const missing = [
-    ...(parsed.start && !startPt ? [parsed.start] : []),
-    ...(parsed.end && !endPt ? [parsed.end] : []),
-    ...parsed.stops.filter((_, i) => !stopPts[i]).map((s) => s.query),
-  ];
-  if (missing.length || !startPt) {
-    throw new TextRouteError("not_found", `Nie znalazłem na mapie: ${missing.join("; ")}. Doprecyzuj (dzielnica, ulica, pełna nazwa) i spróbuj jeszcze raz.`);
+  const wanted = [...(parsed.start ? [{ query: parsed.start, kind: "place" }] : []), ...(parsed.end ? [{ query: parsed.end, kind: "place" }] : []), ...parsed.stops];
+  const found = await resolveStops(key, wanted, start);
+  let at = 0;
+  const startPt = parsed.start ? found[at++] : home("Start");
+  const endPt = parsed.end ? found[at++] : null;
+  const stopRes = found.slice(at);
+  const stops = stopRes.filter((p): p is ResolvedPoint => Boolean(p));
+  const missing = [...(parsed.start && !startPt ? [parsed.start] : []), ...(parsed.end && !endPt ? [parsed.end] : []), ...parsed.stops.filter((_, i) => !stopRes[i]).map((s) => osmName(s.query) || s.query)];
+  if (!startPt || !stops.length) {
+    throw new TextRouteError("not_found", `Nie znalazłem na mapie: ${missing.join("; ")}. Doprecyzuj (pełna nazwa, ulica, dzielnica) i spróbuj jeszcze raz.`);
   }
-  const stops = stopPts as ResolvedPoint[];
+  // Miejsca, których nie udało się potwierdzić, pomijamy, ale głośno: lepsza trasa przez resztę niż przez "cokolwiek".
+  if (missing.length) warnings.push(`Nie znalazłem na mapie: ${missing.join("; ")}. Trasa idzie bez tych punktów. Doprecyzuj nazwę (ulica, dzielnica), jeśli mają być uwzględnione.`);
   const finish = endPt ?? { ...startPt, name: startPt.name === "Start" ? "Meta (start)" : startPt.name };
   for (const p of [startPt, endPt, ...stops]) {
     if (p && p.confidence === "low") warnings.push(`„${p.name}” rozpoznałem niepewnie (znalazłem: ${p.found}). Sprawdź na mapie.`);
@@ -352,6 +434,13 @@ export async function planTextRoute(env: { ORS_API_KEY: string } & Env, start: L
   if (target && Math.abs(lenM(picked[0]) - target) > 0.1 * target) {
     warnings.push(`Wyszło ${picked[0].distance_km.toLocaleString("pl-PL")} km, a prosiłeś o ${parsed.targetKm!.toLocaleString("pl-PL")} km. Dodaj miejsce albo napisz, gdzie dołożyć dystans.`);
   }
+  // Kontrola jakości: czy trasa naprawdę przechodzi przez wskazane miejsca i czy nie biegnie w dużej części tą samą drogą.
+  const best = picked[0];
+  for (const p of stops) {
+    const near = best.coords.reduce((m, [lon, lat]) => Math.min(m, distM(p, { lat, lon })), Infinity);
+    if (near > 300) warnings.push(`Trasa omija „${p.name}” (najbliżej ${Math.round(near / 10) * 10} m): nie ma tam drogi dla pieszych albo punkt został rozpoznany nie w tym miejscu.`);
+  }
+  if (best.retrace_pct > 35) warnings.push(`${best.retrace_pct}% trasy biegnie tą samą drogą dwa razy. Sprawdź kolejność miejsc i czy każde jest we właściwym miejscu na mapie.`);
   const via = stops.map((p) => p.name);
   const options: RouteOption[] = picked.map((m, i) => ({ label: String.fromCharCode(65 + i), ...m, source: "opis", via }));
   return { points: ordered, options, parsed, warnings };
