@@ -62,6 +62,13 @@ export interface NutritionConfig {
   macroWeightKg: number | null;
   /** Docelowa waga. Gdy nie ma jawnej masy referencyjnej, gramy na kg liczone są od niższej z wagi i celu. */
   goalWeightKg: number | null;
+  /** Do kiedy ma być waga docelowa (YYYY-MM-DD), np. start maratonu. Null = bez terminu. */
+  goalDate: string | null;
+  /**
+   * Korekta danych z Garmina: mnoży spoczynkowe i aktywne spalanie wzięte z zegarka (po osobnym ×0,85 dla aktywnych).
+   * Zegarki zawyżają spalanie, więc domyślnie 0,9. Po kalibracji z wagi (ok. 3–4 tygodni danych) Garmin przestaje być potrzebny.
+   */
+  garminFactor: number;
   weightFallbackKg: number | null;
 }
 
@@ -70,12 +77,14 @@ export const DEFAULT_CONFIG: NutritionConfig = {
   weekendSlots: [],
   remindersOn: true,
   remindAfterMin: 180,
-  proteinPerKg: 1.8,
-  fatPerKg: 1.0,
+  proteinPerKg: 1.6, // dla Janka w redukcji: od 95 kg to ok. 150 g
+  fatPerKg: 0.8,
   carbsPerKg: { rest: 3.5, easy: 4.5, quality: 6, long: 7 },
   deficitKcal: 600, // Janek redukuje masę ciała 107 -> 95 kg (patrz TRENER.md); /cel deficyt 0 wyłącza
   macroWeightKg: null,
   goalWeightKg: 95,
+  goalDate: "2027-04-25", // start Energa Gdańsk Maraton
+  garminFactor: 0.9,
   weightFallbackKg: null,
 };
 
@@ -378,13 +387,12 @@ export function computeTargets(cfg: NutritionConfig, weightKg: number | null, da
     if (base.source === "garmin" && base.detail) {
       // Od spokojnego dnia (spoczynkowe + lekka aktywność) w górę: bieg z planu doliczany z góry, a gdy Garmin pokazuje dziś
       // więcej wysiłku niż w planie (spacer, góry, dłuższy bieg), cel rośnie do faktycznego spalania.
-      const quietActive = GARMIN_ACTIVE_HAIRCUT * base.detail.quietActive;
+      const f = cfg.garminFactor;
       const runKcal = RUN_KCAL_PER_KG_KM * weightKg * (ctx?.runKm ?? DEFAULT_RUN_KM[dayType]);
-      const planned = quietActive + runKcal;
-      const actual = ctx?.activeTodayKcal != null ? GARMIN_ACTIVE_HAIRCUT * ctx.activeTodayKcal : 0;
-      const active = Math.max(planned, actual);
+      const planned = f * (base.detail.resting + GARMIN_ACTIVE_HAIRCUT * base.detail.quietActive) + runKcal;
+      const actual = ctx?.activeTodayKcal != null ? f * (base.detail.resting + GARMIN_ACTIVE_HAIRCUT * ctx.activeTodayKcal) : 0;
+      kcal = Math.max(planned, actual);
       raised = Math.max(0, actual - planned);
-      kcal = base.detail.resting + active;
     } else kcal = base.kcal * DAY_FACTOR[dayType];
     if (cfg.deficitKcal > 0) {
       if (deficitDay) {
@@ -449,13 +457,36 @@ export function weightStats(weights: Weight[], today: string) {
   };
 }
 
-/** Postęp do wagi docelowej: ile zostało, tempo z regresji (jeśli są dane) i orientacyjna prognoza w tygodniach. */
-export function goalProgress(weights: Weight[], goalKg: number | null, today: string) {
+/**
+ * Postęp do wagi docelowej: ile zostało, tempo z regresji (jeśli są dane), prognoza oraz plan liniowy do terminu
+ * (od pierwszego zapisanego ważenia do wagi docelowej w dniu goalDate) i tempo potrzebne od dziś.
+ */
+export function goalProgress(weights: Weight[], goalKg: number | null, today: string, goalDate: string | null = null) {
   const s = weightStats(weights, today);
+  const sorted = [...weights].sort((a, b) => a.date.localeCompare(b.date));
+  const first = sorted[0] ?? null;
   const slope = weightSlopePerDay(weights, today, 28);
   const trend = slope === null ? null : r1(slope * 7); // kg na tydzień
   const toGo = s.last && goalKg ? r1(s.last.kg - goalKg) : null;
   const weeksToGoal = toGo !== null && toGo > 0 && trend !== null && trend < -0.05 ? Math.ceil(toGo / -trend) : null;
+
+  let planKgToday: number | null = null;
+  let aheadKg: number | null = null; // dodatnie = lżej niż w planie
+  let requiredKgPerWeek: number | null = null;
+  let weeksLeft: number | null = null;
+  if (goalDate) {
+    const daysLeft = daysBetween(today, goalDate);
+    weeksLeft = daysLeft > 0 ? r1(daysLeft / 7) : 0;
+    if (s.last && goalKg && daysLeft > 0 && s.last.kg > goalKg) requiredKgPerWeek = r1((s.last.kg - goalKg) / (daysLeft / 7));
+    if (first && goalKg && first.kg > goalKg) {
+      const total = daysBetween(first.date, goalDate);
+      if (total > 0) {
+        const frac = Math.min(1, Math.max(0, daysBetween(first.date, today) / total));
+        planKgToday = r1(first.kg - (first.kg - goalKg) * frac);
+        if (s.last) aheadKg = r1(planKgToday - s.last.kg);
+      }
+    }
+  }
   return {
     last: s.last,
     daysSinceWeighIn: s.last ? daysBetween(s.last.date, today) : null,
@@ -463,6 +494,11 @@ export function goalProgress(weights: Weight[], goalKg: number | null, today: st
     toGoKg: toGo,
     trendKgPerWeek: trend,
     weeksToGoal,
+    goalDate,
+    weeksLeft,
+    planKgToday,
+    aheadKg,
+    requiredKgPerWeek,
   };
 }
 
