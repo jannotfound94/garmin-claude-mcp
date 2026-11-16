@@ -60,6 +60,7 @@ export async function viewPlan(root) {
 
   root.replaceChildren(
     header("Plan treningowy", `Ostatnie 7 dni: ${n1(d.runKmLast7)} km · 14 dni: ${n1(d.runKmLast14)} km`, iconButton("refresh", "Odśwież", rerender)),
+    textRouteCard(),
     card({ icon: "sparkles", tone: "orange", title: "Nowy plan od trenera" }, h("div", { class: "small muted" }, "Trener (Claude) ułoży plan wg ustalonych zasad (cel maratonu, regeneracja, pogoda) i wpisze go do kalendarza. Odpowiedź zobaczysz w Ty → Trener."), weeks, note, ask),
     card({ icon: "run", tone: "orange", title: "Kilometry", range: "ostatnie 14 dni" }, areaChart({ points: km, color: "orange", unit: "km", xLabels: [{ i: 0, text: `${dateObj(addDays(today, -13)).getUTCDate()}.${String(dateObj(addDays(today, -13)).getUTCMonth() + 1).padStart(2, "0")}` }, { i: 13, text: "dziś" }], label: "Kilometry z ostatnich 14 dni" })),
     h("button", { class: "btn ghost block", onclick: async (ev) => { const b = ev.currentTarget; b.disabled = true; try { const r = await shareLocation(); toast(r.location ? `Zapisano lokalizację${r.location.odDomuKm != null ? ` (${n1(r.location.odDomuKm)} km od domu)` : ""} ✅` : "Zapisano lokalizację ✅"); rerender(); } catch (e) { toast(e.message || "Błąd lokalizacji.", "error", 6000); b.disabled = false; } } }, icon("pin", 17), "Użyj mojej lokalizacji (pogoda i trasy stąd)"),
@@ -106,4 +107,34 @@ function planCard(p, weatherDay) {
     h("div", { class: "actions" }, descr ? h("button", { class: "btn ghost small", onclick: (e) => ((descr.hidden = !descr.hidden), (e.currentTarget.lastChild.textContent = descr.hidden ? "Kroki treningu" : "Ukryj")) }, icon("calendar", 16), h("span", {}, "Kroki treningu")) : null, routeBtn),
     routes,
   );
+}
+
+// ---------------- Trasa z opisu ----------------
+
+const KIND_PL = { start: "start", place: "miejsce", street: "ulica", address: "adres", park: "park", bridge: "most", area: "okolica" };
+
+function textRouteCard() {
+  const text = h("textarea", { placeholder: "np. z domu nad Wisłę przez Fort Sokolnickiego, plaża Żoliborz, ulica Kaniowa, park przy Cytadeli i do domu\nalbo luźniej: 10 km, najpierw po tej stronie Wisły, Gdańskim na drugą stronę, powrót kładką", "aria-label": "Opis trasy", maxlength: 800, rows: 4 });
+  const out = h("div", { class: "wk" });
+  const go = h("button", { class: "btn block" }, icon("route", 18), "Wyznacz trasę z opisu");
+  go.addEventListener("click", async () => {
+    const t = text.value.trim();
+    if (t.length < 8) return toast("Opisz trasę: miejsca po kolei i/lub dystans.", "error");
+    go.disabled = true;
+    out.replaceChildren(h("div", { class: "status" }, h("div", { class: "spinner" }), "Rozumiem opis, szukam miejsc i wyznaczam trasę…"));
+    try {
+      const r = await api("/routes/text", { method: "POST", body: { text: t }, timeoutMs: 90000 });
+      out.replaceChildren(
+        ...(r.warnings || []).map((w) => h("div", { class: "small warn" }, `⚠️ ${w}`)),
+        h("div", { class: "route" }, h("strong", {}, "Rozpoznane punkty"), h("ol", { class: "pts" }, r.points.map((p) => h("li", {}, h("span", {}, p.name), h("span", { class: "small muted" }, ` · ${KIND_PL[p.kind] || p.kind}${p.found && p.found !== p.name ? ` → ${p.found}` : ""}${p.confidence === "low" ? " (niepewnie)" : ""}`)))), h("div", { class: "small muted" }, "Jeśli coś jest źle, doprecyzuj w opisie (dzielnica, ulica, pełna nazwa) i wyznacz jeszcze raz.")),
+        ...r.options.map((o) =>
+          h("div", { class: "route" }, h("div", { class: "row between" }, h("strong", {}, `Trasa ${o.label} · ${n1(o.km)} km`), chip("wg opisu", "good")), h("div", { class: "small muted" }, `nieutwardzona ${n0(o.unpavedPct)}% · zieleń ${n1(o.greenAvg)}/10 · dwa razy tą samą drogą ${n0(o.retracePct)}%`), h("div", { class: "links" }, h("a", { href: o.mapUrl }, "Mapa"), h("a", { href: o.gpxUrl }, "Otwórz GPX w aplikacji"))),
+        ),
+      );
+    } catch (e) {
+      out.replaceChildren(h("div", { class: "status" }, `⚠️ ${errMsg(e)}`));
+    }
+    go.disabled = false;
+  });
+  return card({ icon: "route", tone: "orange", title: "Trasa z opisu" }, h("div", { class: "small muted" }, "Opisz własnymi słowami (możesz podyktować klawiaturą): miejsca po kolei albo dystans i ogólny przebieg. Trasa pójdzie dokładnie przez wskazane miejsca."), text, go, out);
 }

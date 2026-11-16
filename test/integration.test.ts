@@ -972,3 +972,13 @@ test("rodzaj posiłku z aplikacji: obiad zaliczają okno z planu, deser i przek�
   assert.equal(satisfiedSlots(slots, [{ time: "10:00", slot: "obiad", kind: "obiad" }], 180).has(1), true);
   mock.timers.reset();
 });
+
+test("API trasa z opisu: walidacja długości opisu i brak kluczy", async () => {
+  TOKEN = await issueToken(env);
+  assert.equal((await api("/api/routes/text", { method: "POST", body: { text: "biegnę" } })).status, 400);
+  assert.equal((await api("/api/routes/text", { method: "POST", body: { text: "x".repeat(801) } })).status, 400);
+  assert.equal((await api("/api/routes/text", { method: "POST", body: { text: "z domu nad Wisłę i z powrotem" }, token: null })).status, 401);
+  const noKey = await api("/api/routes/text", { method: "POST", body: { text: "z domu nad Wisłę i z powrotem" } });
+  assert.equal(noKey.status, 501, "w teście brak ORS_API_KEY");
+  assert.match(noKey.body.message, /ORS_API_KEY/);
+});

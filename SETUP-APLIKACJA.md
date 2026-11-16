@@ -67,6 +67,15 @@ Jeśli powiadomienia nie przychodzą: sprawdź zgodę (ikona kłódki przy adres
 
 APK od wersji z tą poprawką prosi o zgodę na lokalizację (przy pierwszym „Użyj mojej lokalizacji”). Jeśli wcześniej odmówiłeś, włącz ją w Ustawienia telefonu → Aplikacje → Garda → Uprawnienia → Lokalizacja. Przycisk „wstecz” cofa po ekranach aplikacji i mapie trasy, a na ekranie startowym chowa aplikację. „Otwórz GPX w aplikacji” nie pobiera pliku do katalogu Pobrane, tylko od razu pokazuje listę aplikacji, w których można go otworzyć (np. Locus, OsmAnd; Garmin Connect, jeśli zgłasza się do plików GPX na Twoim telefonie). Jeśli Garmin Connect nie ma na liście, kurs dodasz w Garmin Connect w przeglądarce (Szkolenia → Kursy → Importuj). Nowe APK instaluje się nad starym (ten sam podpis), bez odinstalowywania.
 
+## Trasa z opisu słownego
+
+Plan → „Trasa z opisu”: wpisz albo podyktuj (mikrofon klawiatury Gboard) opis trasy, np.:
+
+- szczegółowo: „z domu nad Wisłę przez Fort Sokolnickiego, plaża Żoliborz, ulica Kaniowa, park przy Cytadeli i do domu”,
+- luźno: „10 km, najpierw po tej stronie Wisły, Gdańskim na drugą stronę, powrót kładką”.
+
+Gemini rozbija opis na miejsca po kolei, miejsca są wyszukiwane na mapie (OpenStreetMap i geokoder OpenRouteService), a trasa idzie dokładnie przez nie. Przy podanym dystansie trasa jest wydłużana objazdem, najlepiej w miejscu wskazanym w opisie („po tej stronie Wisły” = przed pierwszym miejscem). Sprawdź listę „Rozpoznane punkty” i numerowane punkty na mapie: niepewnie rozpoznane są oznaczone. Jeśli coś jest źle, doprecyzuj opis (dzielnica, ulica, pełna nazwa) i wyznacz jeszcze raz. Trener ma do tego narzędzie `proposeRouteFromText`. Wymaga sekretów `ORS_API_KEY` i `GEMINI_API_KEY`.
+
 ## Jak korzystać
 
 - **Dodaj posiłek:** pomarańczowy przycisk ＋ na dole (działa na każdym ekranie). Zdjęcie z aparatu lub z galerii, opis tekstem, godzina (gdy dopisujesz coś z wcześniej). Jeśli Gemini jest chwilowo przeciążony, aplikacja sama ponowi próbę kilka razy.

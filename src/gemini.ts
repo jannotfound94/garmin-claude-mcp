@@ -257,6 +257,51 @@ export async function analyzeMeal(env: Env, input: AnalyzeInput): Promise<MealAn
   throw fail();
 }
 
+/**
+ * Ogólne pytanie do Gemini z odpowiedzią JSON wg schematu (np. rozbiór opisu trasy). Te same modele, warianty myślenia
+ * i klasyfikacja błędów co w analyzeMeal: chwilowa awaria to GeminiTransientError, reszta to zwykły Error.
+ */
+export async function askGeminiJson(env: Env, o: { system: string; user: string; schema: unknown; budgetMs?: number; maxOutputTokens?: number }): Promise<any> {
+  if (!env.GEMINI_API_KEY) throw new Error("Brak GEMINI_API_KEY");
+  const models = [env.GEMINI_MODEL || DEFAULT_MODEL, env.GEMINI_FALLBACK_MODEL || DEFAULT_FALLBACK_MODEL].filter((m, i, a) => a.indexOf(m) === i);
+  const errors: string[] = [];
+  let permanent = false;
+  const fail = () => {
+    const msg = errors.join(" | ").slice(0, 600) || "Gemini: przekroczony limit czasu";
+    return permanent ? new Error(msg) : new GeminiTransientError(msg);
+  };
+  const deadline = Date.now() + (o.budgetMs ?? 25_000);
+  for (const [mi, model] of models.entries()) {
+    const isLast = mi === models.length - 1;
+    for (const thinking of THINKING_VARIANTS) {
+      const left = deadline - Date.now();
+      if (left < MIN_ATTEMPT_MS) throw fail();
+      const body = {
+        systemInstruction: { parts: [{ text: o.system }] },
+        contents: [{ role: "user", parts: [{ text: o.user }] }],
+        generationConfig: { responseMimeType: "application/json", responseSchema: o.schema, temperature: 0.1, maxOutputTokens: o.maxOutputTokens ?? 2048, ...(thinking ? { thinkingConfig: thinking } : {}) },
+      };
+      try {
+        const resp = await callModel(env.GEMINI_API_KEY, model, body, isLast ? left : Math.min(left, ATTEMPT_CAP_MS));
+        const cand = resp?.candidates?.[0];
+        const out = (cand?.content?.parts ?? []).filter((p: any) => typeof p?.text === "string" && !p.thought).map((p: any) => p.text).join("");
+        if (!out) throw new Error(`Gemini ${model}: brak wyniku (${resp?.promptFeedback?.blockReason ?? cand?.finishReason ?? "pusta odpowiedź"})`);
+        try {
+          return JSON.parse(out);
+        } catch {
+          throw new Error(`Gemini ${model}: niepoprawny JSON (${cand?.finishReason ?? "?"})`);
+        }
+      } catch (e) {
+        errors.push((e instanceof Error ? e.message : String(e)).slice(0, 250));
+        if (thinking && e instanceof GeminiHttpError && e.status === 400) continue;
+        if (!isTransient(e)) permanent = true;
+        break;
+      }
+    }
+  }
+  throw fail();
+}
+
 /** Szybki test z panelu /setup: czy klucz i model działają (bez zdjęcia). */
 export async function pingGemini(env: Env): Promise<string> {
   const a = await analyzeMeal(env, { note: "dwa jajka sadzone na maśle i kromka chleba żytniego", nowLocal: { date: "2026-01-01", time: "08:00" } });
