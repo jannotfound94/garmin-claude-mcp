@@ -291,8 +291,12 @@ test("Garmin energy base is a median (outlier day ignored), /spalanie shows days
     const active = i === 3 ? 20000 : 500; // jeden dzień z absurdalną wartością
     garminDays.push({ calendarDate: date, calories: { burnedResting: 2500, burnedActive: active, burnedTotal: 2500 + active } });
   }
+  // stara wartość z poprzedniego sposobu liczenia (średnia, bez "detail") w pamięci podręcznej nie może przeżyć
+  await storage.put("cache:energybase:2026-11-18", { at: Date.now(), data: JSON.stringify({ kcal: 3870, source: "garmin" }) });
+  await storage.put("cache:energybase:v2:2026-11-18", { at: Date.now(), data: JSON.stringify({ kcal: 3870, source: "garmin" }) });
   await send({ message: { chat, date: now(), text: "/cel" } });
   const cel = lastText();
+  assert.doesNotMatch(cel, /3870/);
   assert.match(cel, /mediany spalania z Garmina/);
   assert.match(cel, new RegExp(`ok\\. ${Math.round(2500 + 0.85 * 500)} kcal`)); // 2925, a średnia byłaby ~4000
   assert.match(cel, /14 dni: spoczynkowe 2500 \+ aktywne 500/);
@@ -301,6 +305,7 @@ test("Garmin energy base is a median (outlier day ignored), /spalanie shows days
   assert.equal(sent[sent.length - 1].parse_mode, "HTML");
   assert.match(burn, /11-15: <b>22500<\/b> = 2500 \+ 20000/);
   assert.match(burn, /Baza do celów \(mediana, aktywne ×0,85\): <b>2925<\/b> kcal/);
+  assert.match(burn, /Najspokojniejsze dni \(3 najniższe\): ok\. 2925 kcal, najbardziej aktywne: 19500 kcal/);
   env.GARMIN_PERSONAL_API_KEY = undefined;
   mock.timers.reset();
 });

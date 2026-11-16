@@ -92,8 +92,12 @@ export async function energyBase(env: Env, today: string): Promise<EnergyBase | 
   );
   if (cal.ready) return { kcal: cal.tdeeKcal, source: "kalibracja" };
 
-  const cached = await st.getCache(`energybase:${today}`, 6 * 3600_000);
-  if (cached) return JSON.parse(cached) as EnergyBase;
+  // Klucz z wersją: zmiana sposobu liczenia nie może zwracać starej wartości z pamięci podręcznej.
+  const cached = await st.getCache(`energybase:v2:${today}`, 6 * 3600_000);
+  if (cached) {
+    const c = JSON.parse(cached) as EnergyBase;
+    if (c.source !== "garmin" || c.detail) return c;
+  }
   const g = garminClient(env);
   if (!g) return null;
   const rows = Object.values(await g.energy(addDays(today, -14), addDays(today, -1))).filter(
@@ -107,7 +111,7 @@ export async function energyBase(env: Env, today: string): Promise<EnergyBase | 
     source: "garmin",
     detail: { days: rows.length, resting: r0(median(rows.map((e) => e.resting!))), active: r0(median(rows.map((e) => e.active!))), min: r0(Math.min(...day)), max: r0(Math.max(...day)) },
   };
-  await st.setCache(`energybase:${today}`, JSON.stringify(base));
+  await st.setCache(`energybase:v2:${today}`, JSON.stringify(base));
   return base;
 }
 
@@ -557,7 +561,16 @@ async function cmdBurn(env: Env) {
     lines.push(`${d.slice(5)}${d === today ? " (dziś, trwa)" : ""}: <b>${e.total != null ? r0(e.total) : "?"}</b> = ${e.resting != null ? r0(e.resting) : "?"} + ${e.active != null ? r0(e.active) : "?"}`);
   }
   const base = await energyBase(env, today).catch(() => null);
-  lines.push("", base?.detail ? `Baza do celów (mediana, aktywne ×0,85): <b>${base.kcal}</b> kcal` : "Za mało pełnych dni, żeby policzyć bazę.", "<i>Zobacz, czy któryś dzień ma nienaturalnie wysoką lub niską wartość.</i>");
+  const full = rows.filter(([d, e]) => d < today && e.total && e.resting != null && e.active != null);
+  const perDay = full.map(([, e]) => e.resting! + GARMIN_ACTIVE_HAIRCUT * e.active!).sort((a, b) => a - b);
+  lines.push("");
+  if (base?.detail) {
+    lines.push(`Baza do celów (mediana, aktywne ×0,85): <b>${base.kcal}</b> kcal`);
+    const quiet = perDay.slice(0, Math.min(3, perDay.length));
+    lines.push(`Najspokojniejsze dni (3 najniższe): ok. ${r0(quiet.reduce((a, b) => a + b, 0) / quiet.length)} kcal, najbardziej aktywne: ${r0(perDay[perDay.length - 1])} kcal`);
+  } else if (base) lines.push(`Baza do celów: <b>${base.kcal}</b> kcal (${base.source === "kalibracja" ? "z kalibracji wagi i spożycia" : "Garmin"})`);
+  else lines.push(`Za mało pełnych dni z danymi (jest ${full.length}, potrzeba min. 5), żeby policzyć bazę.`);
+  lines.push("<i>Duże rozrzuty między dniami oznaczają zwykle aktywności, o których cel nie wie z góry (spacery, góry, trening poza planem).</i>");
   await say(env, lines.join("\n"), undefined, true);
 }
 
