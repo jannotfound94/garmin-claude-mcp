@@ -212,6 +212,7 @@ export class MyMCP extends McpAgent<Env> {
             nawierzchnia_nieznana_proc: o.unknown_surface_pct,
             sciezki_i_alejki_proc: o.paths_pct,
             zielen_0_10: o.green_avg,
+            odcinki_biegane_dwa_razy_proc: o.retrace_pct,
             mapa: `${base}/trasa/${id}/${o.label}`,
           })),
           uwaga: "Dane o nawierzchni pochodzą z OpenStreetMap i bywają niepełne (stąd „nieznana”).",
@@ -530,7 +531,7 @@ const defaultHandler = {
           headers: { "content-type": "application/gpx+xml", "content-disposition": `attachment; filename="trasa-${o.label}.gpx"` },
         });
       }
-      const title = `${name}: ${o.unpaved_pct}% nieutwardzonej, zieleń ${o.green_avg}/10`;
+      const title = `${name}: ${o.unpaved_pct}% nieutwardzonej, zieleń ${o.green_avg}/10, ${o.retrace_pct}% dwa razy`;
       return new Response(mapPage(esc(title), o.coords, `/trasa/${p.id}/${o.label}.gpx`), { headers: html });
     }
     if (url.pathname === "/setup") return handleSetup(request, env, url.origin);

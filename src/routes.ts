@@ -25,6 +25,7 @@ export interface RouteOption {
   unknown_surface_pct: number;
   paths_pct: number; // paths, tracks, footways
   green_avg: number; // 0-10
+  retrace_pct: number; // share of the loop run twice (out-and-back parts); 0 = clean loop
   coords: [number, number][]; // [lon, lat]
 }
 
@@ -69,7 +70,7 @@ async function loop(apiKey: string, start: LatLon, meters: number, seed: number)
       instructions: false,
       extra_info: ["surface", "waytype", "green"],
       options: {
-        round_trip: { length: meters, points: 5, seed },
+        round_trip: { length: meters, points: 6, seed },
         avoid_features: ["steps"],
         profile_params: { weightings: { green: 1, quiet: 1 } },
       },
@@ -88,6 +89,7 @@ async function loop(apiKey: string, start: LatLon, meters: number, seed: number)
     paved_pct: Math.round(paved),
     unknown_surface_pct: Math.max(0, Math.round(100 - unpaved - paved)),
     paths_pct: Math.round(summaryPct(ex.waytype?.summary, (v) => PATHS.has(v))),
+    retrace_pct: retracePct(f.geometry.coordinates),
     green_avg: Math.round(weightedAvg(ex.green?.summary) * 10) / 10,
     coords: f.geometry.coordinates as [number, number][],
   };
@@ -95,7 +97,38 @@ async function loop(apiKey: string, start: LatLon, meters: number, seed: number)
 
 /** Score: soft surface first, then greenery, then paths; unknown surface on paths counts half. */
 function score(o: Omit<RouteOption, "label">) {
-  return o.unpaved_pct + 0.5 * Math.min(o.unknown_surface_pct, o.paths_pct) + 3 * o.green_avg + 0.2 * o.paths_pct;
+  return (
+    o.unpaved_pct + 0.5 * Math.min(o.unknown_surface_pct, o.paths_pct) + 3 * o.green_avg + 0.2 * o.paths_pct - 1.5 * o.retrace_pct
+  );
+}
+
+/**
+ * How much of a loop is run twice (Jan dislikes out-and-back): the route is resampled every ~25 m
+ * and a sample counts as retraced if the route passes within ~25 m of it again more than 300 m
+ * later or earlier. The first and last 250 m (leaving and returning home) are ignored.
+ */
+export function retracePct(coords: number[][]): number {
+  if (coords.length < 2) return 0;
+  const lat0 = (coords[0][1] * Math.PI) / 180;
+  const xy = coords.map(([lon, lat]) => [lon * 111320 * Math.cos(lat0), lat * 110540]);
+  const pts: { x: number; y: number; d: number }[] = [];
+  let dist = 0;
+  pts.push({ x: xy[0][0], y: xy[0][1], d: 0 });
+  for (let i = 1; i < xy.length; i++) {
+    const [x0, y0] = xy[i - 1];
+    const [x1, y1] = xy[i];
+    const seg = Math.hypot(x1 - x0, y1 - y0);
+    for (let t = 25; t < seg; t += 25) pts.push({ x: x0 + ((x1 - x0) * t) / seg, y: y0 + ((y1 - y0) * t) / seg, d: dist + t });
+    dist += seg;
+    pts.push({ x: x1, y: y1, d: dist });
+  }
+  const inner = pts.filter((p) => p.d > 250 && p.d < dist - 250);
+  if (!inner.length) return 0;
+  let retraced = 0;
+  for (const p of inner) {
+    if (inner.some((q) => Math.abs(q.d - p.d) > 300 && Math.abs(q.x - p.x) < 25 && Math.abs(q.y - p.y) < 25 && Math.hypot(q.x - p.x, q.y - p.y) < 25)) retraced++;
+  }
+  return Math.round((100 * retraced) / inner.length);
 }
 
 /** Overlap of two loops (share of sampled points of a lying within ~60 m of b). */
@@ -111,18 +144,39 @@ function overlap(a: [number, number][], b: [number, number][]) {
   return n ? hit / n : 0;
 }
 
-export async function proposeLoops(apiKey: string, start: LatLon, targetKm: number, tries = 8): Promise<RouteOption[]> {
-  const meters = Math.round(targetKm * 1000);
+/**
+ * OpenRouteService treats the round-trip length only as a preference, so a loop for "5 km" can come
+ * back as 6-8 km. For each seed the requested length is rescaled by target/actual and re-requested
+ * (up to 2 corrections), keeping the closest result.
+ */
+async function calibratedLoop(apiKey: string, start: LatLon, targetKm: number, seed: number) {
+  let request = targetKm * 1000;
+  let best = await loop(apiKey, start, Math.round(request), seed);
+  for (let i = 0; i < 2; i++) {
+    const err = best.distance_km / targetKm - 1;
+    if (Math.abs(err) <= 0.05 || best.distance_km <= 0) break;
+    request = request * (targetKm / best.distance_km);
+    const next = await loop(apiKey, start, Math.round(request), seed).catch(() => null);
+    if (next && Math.abs(next.distance_km - targetKm) < Math.abs(best.distance_km - targetKm)) best = next;
+  }
+  return best;
+}
+
+export async function proposeLoops(apiKey: string, start: LatLon, targetKm: number, tries = 6): Promise<RouteOption[]> {
   const seeds = Array.from({ length: tries }, (_, i) => Math.floor(Math.random() * 1000) + i * 1000);
-  const settled = await Promise.allSettled(seeds.map((s) => loop(apiKey, start, meters, s)));
+  const settled = await Promise.allSettled(seeds.map((s) => calibratedLoop(apiKey, start, targetKm, s)));
   const ok = settled.filter((r): r is PromiseFulfilledResult<Awaited<ReturnType<typeof loop>>> => r.status === "fulfilled").map((r) => r.value);
   if (!ok.length) {
     const err = settled.find((r) => r.status === "rejected") as PromiseRejectedResult | undefined;
     throw new Error(String(err?.reason ?? "Nie udało się wyznaczyć tras"));
   }
-  // Prefer loops within 15% of the target length.
-  const near = ok.filter((o) => Math.abs(o.distance_km - targetKm) <= targetKm * 0.15);
-  const pool = (near.length >= 2 ? near : ok).sort((a, b) => score(b) - score(a));
+  const off = (o: { distance_km: number }) => Math.abs(o.distance_km - targetKm) / targetKm;
+  // Only loops within 10% of the target; if fewer than two qualify, take the closest ones by length.
+  // Prefer real loops (at most ~25% run twice) when there are enough of them.
+  const loopsOnly = ok.filter((o) => o.retrace_pct <= 25);
+  const candidates = loopsOnly.length >= 2 ? loopsOnly : ok;
+  const near = candidates.filter((o) => off(o) <= 0.1);
+  const pool = near.length >= 2 ? near.sort((a, b) => score(b) - score(a)) : [...candidates].sort((a, b) => off(a) - off(b));
   const picked = [pool[0]];
   const second = pool.slice(1).find((o) => overlap(o.coords, pool[0].coords) < 0.6) ?? pool[1];
   if (second) picked.push(second);
