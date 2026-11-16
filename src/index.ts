@@ -9,7 +9,7 @@ import { runScheduler } from "./scheduler";
 import { distKm, resolveLocation } from "./location";
 import { fetchForecast } from "./weather";
 import { geocode, mapPage, proposeLoops, toGpx } from "./routes";
-import { type Anchor, anchorRadiusM, fetchAnchors } from "./parks";
+import { loadAnchors, warmAnchors } from "./anchors";
 import { coach, handleTelegramWebhook, sendTelegram, sendTelegramFile, tg, webhookSecret } from "./telegram";
 import { addDays, daysBetween, fmtWarsaw, warsaw, warsawToUtc } from "./time";
 
@@ -31,29 +31,6 @@ async function currentLocation(env: Env) {
 
 async function weatherLocation(env: Env) {
   return (await currentLocation(env))?.point ?? null;
-}
-
-/**
- * Parks and soft paths around the start (OpenStreetMap via Overpass), cached for 30 days: they hardly
- * change, and the public Overpass server is slow and sometimes unavailable. On failure the routes
- * simply fall back to OpenRouteService's own round trips.
- */
-async function loadAnchors(env: Env, start: { lat: number; lon: number }, targetKm: number) {
-  const radius = anchorRadiusM(targetKm);
-  const key = `anchors:${start.lat.toFixed(3)},${start.lon.toFixed(3)}:${radius}`;
-  const st = coach(env);
-  const hit = await st.getCache(key, 30 * 86400_000);
-  if (hit) {
-    const cached = JSON.parse(hit) as Anchor[];
-    return { anchors: cached, info: `dane o parkach z pamięci (${cached.length} miejsc)` };
-  }
-  try {
-    const anchors = await fetchAnchors(start, radius);
-    await st.setCache(key, JSON.stringify(anchors));
-    return { anchors, info: `pobrano dane o parkach (${anchors.length} miejsc)` };
-  } catch (e) {
-    return { anchors: [] as Anchor[], info: `bez danych o parkach: ${String(e).slice(0, 120)}` };
-  }
 }
 
 const NO_LOCATION = "Pogoda niedostępna: brak punktu startu (adres lub współrzędne na stronie /setup albo udostępniona lokalizacja).";
@@ -242,7 +219,7 @@ export class MyMCP extends McpAgent<Env> {
         if (!loc) return text("Trasy niedostępne: brak punktu startu (ustaw adres domowy na stronie /setup albo poproś Jana o udostępnienie lokalizacji).");
         const start = loc.point;
         const fromHome = loc.kind === "dom";
-        const { anchors, info } = await loadAnchors(this.env, start, distanceKm);
+        const { anchors, info } = await loadAnchors(this.env, start, distanceKm, "interactive");
         const options = await proposeLoops(this.env.ORS_API_KEY, start, distanceKm, anchors);
         const id = crypto.randomUUID().replace(/-/g, "").slice(0, 16);
         await state.saveProposal({
@@ -258,6 +235,7 @@ export class MyMCP extends McpAgent<Env> {
           proposalId: id,
           start: fromHome ? "dom" : "udostępniona lokalizacja Jana",
           poza_domem: loc.poza_domem,
+          ...(anchors.length ? {} : { uwaga: `Brak danych o parkach (${info}); trasy z OpenRouteService.` }),
           opcje: options.map((o) => ({
             trasa: o.label,
             dystans_km: o.distance_km,
@@ -509,7 +487,7 @@ async function routesSection(env: Env, password: string) {
   <li>Teraz pogoda i trasy liczone są dla: ${loc ? (loc.kind === "dom" ? "domu" : "udostępnionej lokalizacji") : "nic (brak punktu startu)"}</li>
   <li>Ostatnia udostępniona lokalizacja: ${lastInfo}</li></ul>
   <form method="post">${hidden}<input name="home_address" placeholder="Adres lub współrzędne startu, np. 52.2500, 21.0000" style="width:100%;padding:.5rem;margin-bottom:.5rem">
-  ${btn("set_home", "Zapisz punkt startu")} ${btn("routes_test", "Wygeneruj testowe trasy 5 km")} ${btn("weather_test", "Sprawdź pogodę")} ${btn("clear_location", "Usuń zapamiętaną lokalizację")}</form>`;
+  ${btn("set_home", "Zapisz punkt startu")} ${btn("warm_parks", "Pobierz dane o parkach")} ${btn("routes_test", "Wygeneruj testowe trasy 5 km")} ${btn("weather_test", "Sprawdź pogodę")} ${btn("clear_location", "Usuń zapamiętaną lokalizację")}</form>`;
 }
 
 async function handleSetup(request: Request, env: Env, origin: string): Promise<Response> {
@@ -573,12 +551,19 @@ async function handleSetup(request: Request, env: Env, origin: string): Promise<
             .join(" | ");
         break;
       }
+      case "warm_parks": {
+        const loc = (await currentLocation(env))?.point;
+        if (!loc) throw new Error("Najpierw zapisz punkt startu.");
+        const r = await loadAnchors(env, loc, 5, "force");
+        notice = `Dane o parkach: ${r.info}${r.anchors.length ? ` Najcięższe miejsca: ${r.anchors.slice(0, 6).map((a) => a.name ?? "ścieżki").join(", ")}.` : ""}`;
+        break;
+      }
       case "routes_test": {
         if (!env.ORS_API_KEY) throw new Error("Najpierw dodaj sekret ORS_API_KEY.");
         const { home } = await coach(env).getRouteSettings();
         if (!home) throw new Error("Najpierw zapisz punkt startu.");
         await coach(env).setOrigin(origin);
-        const { anchors, info } = await loadAnchors(env, home, 5);
+        const { anchors, info } = await loadAnchors(env, home, 5, "force");
         const options = await proposeLoops(env.ORS_API_KEY, home, 5, anchors);
         const id = crypto.randomUUID().replace(/-/g, "").slice(0, 16);
         await coach(env).saveProposal({ id, created: new Date().toISOString(), target_km: 5, start: home, start_label: "dom", options });
@@ -674,6 +659,7 @@ const provider = new OAuthProvider({
 export default {
   fetch: (request: Request, env: Env, ctx: ExecutionContext) => provider.fetch(request, env, ctx),
   async scheduled(_controller: ScheduledController, env: Env, ctx: ExecutionContext) {
-    ctx.waitUntil(runScheduler(env));
+    // The park data for the current start point is fetched here, where nobody is waiting for it.
+    ctx.waitUntil(Promise.all([runScheduler(env), warmAnchors(env).catch((e) => console.error("warmAnchors", e))]));
   },
 } satisfies ExportedHandler<Env>;

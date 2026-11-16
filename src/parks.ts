@@ -17,7 +17,14 @@ export interface Anchor {
   name?: string; // park name, if any
 }
 
-const ENDPOINTS = ["https://overpass-api.de/api/interpreter", "https://overpass.kumi.systems/api/interpreter"];
+// Public Overpass servers. They are free, often busy and sometimes down, so several are tried
+// (staggered, first good answer wins) and every failure is reported.
+const ENDPOINTS = [
+  "https://overpass-api.de/api/interpreter",
+  "https://overpass.private.coffee/api/interpreter",
+  "https://overpass.kumi.systems/api/interpreter",
+  "https://overpass.openstreetmap.fr/api/interpreter",
+];
 
 const SOFT_SURFACES = new Set([
   "ground", "dirt", "earth", "gravel", "fine_gravel", "compacted", "grass", "sand", "unpaved", "pebblestone", "mud", "woodchips",
@@ -29,19 +36,18 @@ export function anchorRadiusM(targetKm: number): number {
   return need <= 2500 ? 2500 : need <= 4000 ? 4000 : 6000;
 }
 
-export function overpassQuery(lat: number, lon: number, radiusM: number): string {
+export function overpassQuery(lat: number, lon: number, radiusM: number, kind: "ways" | "relations" = "ways"): string {
   const a = `(around:${radiusM},${lat.toFixed(3)},${lon.toFixed(3)})`; // ~100 m is enough for a 2.5+ km search
   const open = `["access"!~"^(private|no)$"]`;
-  return (
-    `[out:json][timeout:25];(` +
-    `way["leisure"~"^(park|nature_reserve)$"]${open}${a};` +
-    `relation["leisure"~"^(park|nature_reserve)$"]${open}${a};` +
-    `way["landuse"~"^(forest|meadow|recreation_ground|village_green)$"]${open}${a};` +
-    `way["natural"~"^(wood|grassland|heath|scrub)$"]${open}${a};` +
-    `way["highway"~"^(path|track|footway|bridleway)$"]["surface"~"^(${[...SOFT_SURFACES].join("|")})$"]${open}${a};` +
-    `way["highway"="track"][!"surface"]${open}${a};` +
-    `);out center tags qt 1500;`
-  );
+  const body =
+    kind === "relations"
+      ? `relation["leisure"~"^(park|nature_reserve)$"]${open}${a};`
+      : `way["leisure"~"^(park|nature_reserve)$"]${open}${a};` +
+        `way["landuse"~"^(forest|meadow|recreation_ground|village_green)$"]${open}${a};` +
+        `way["natural"~"^(wood|grassland|heath|scrub)$"]${open}${a};` +
+        `way["highway"~"^(path|track|footway|bridleway)$"]["surface"~"^(${[...SOFT_SURFACES].join("|")})$"]${open}${a};` +
+        `way["highway"="track"][!"surface"]${open}${a};`;
+  return `[out:json][timeout:25];(${body});out center tags qt 1500;`;
 }
 
 interface Raw {
@@ -109,32 +115,67 @@ export function clusterAnchors(raw: Raw[], start: LatLon, max = 150): Anchor[] {
     });
 }
 
-export async function fetchAnchors(start: LatLon, radiusM: number): Promise<Anchor[]> {
-  const body = `data=${encodeURIComponent(overpassQuery(start.lat, start.lon, radiusM))}`;
-  let lastError = "";
-  for (const url of ENDPOINTS) {
+const host = (url: string) => new URL(url).host;
+
+/** POSTs the query to the mirrors, staggered; resolves with the first valid answer, else throws with every error. */
+export async function queryOverpass(query: string, timeoutMs: number, staggerMs: number, endpoints: string[] = ENDPOINTS) {
+  const body = `data=${encodeURIComponent(query)}`;
+  const ctrls = endpoints.map(() => new AbortController());
+  const errors: string[] = endpoints.map(() => "");
+  let won = false;
+  const attempts = endpoints.map(async (url, i) => {
+    await new Promise((r) => setTimeout(r, i * staggerMs));
+    if (won) return null;
+    const timer = setTimeout(() => ctrls[i].abort(), timeoutMs);
     try {
       const res = await fetch(url, {
         method: "POST",
         headers: { "Content-Type": "application/x-www-form-urlencoded", "User-Agent": "running-coach-worker/1.0" },
         body,
-        signal: AbortSignal.timeout(24000),
+        signal: ctrls[i].signal,
       });
-      if (!res.ok) {
-        lastError = `${url} ${res.status}`;
-        continue;
-      }
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const json: any = await res.json();
       if (typeof json.remark === "string" && /runtime error|timed out|out of memory/i.test(json.remark)) {
-        lastError = `${url}: ${json.remark.slice(0, 80)}`;
-        continue;
+        throw new Error(json.remark.slice(0, 60));
       }
-      return clusterAnchors(parseRaw(json), start);
+      won = true;
+      ctrls.forEach((c, j) => j !== i && c.abort());
+      return { json, from: host(url) };
     } catch (e) {
-      lastError = `${url}: ${String(e).slice(0, 80)}`;
+      const why = e instanceof Error ? (e.name === "AbortError" ? `brak odpowiedzi w ${Math.max(1, Math.round(timeoutMs / 1000))} s` : e.message) : String(e);
+      errors[i] = `${host(url)}: ${why.slice(0, 70)}`;
+      return null;
+    } finally {
+      clearTimeout(timer);
     }
-  }
-  throw new Error(`Overpass niedostępny (${lastError})`);
+  });
+  const first = await new Promise<{ json: any; from: string } | null>((resolve) => {
+    let left = attempts.length;
+    for (const a of attempts) a.then((v) => (v ? resolve(v) : --left === 0 ? resolve(null) : undefined));
+  });
+  if (first) return first;
+  throw new Error(`Overpass niedostępny: ${errors.filter(Boolean).join("; ")}`);
+}
+
+export interface FetchOptions {
+  timeoutMs?: number; // per mirror
+  staggerMs?: number; // delay between starting mirrors
+}
+
+/** Parks, woods and soft-surface paths around the start, merged into anchors. Relations are best effort. */
+export async function fetchAnchors(start: LatLon, radiusM: number, opts: FetchOptions = {}): Promise<{ anchors: Anchor[]; info: string }> {
+  const t = opts.timeoutMs ?? 20000;
+  const st = opts.staggerMs ?? 4000;
+  const [ways, rels] = await Promise.allSettled([
+    queryOverpass(overpassQuery(start.lat, start.lon, radiusM, "ways"), t, st),
+    queryOverpass(overpassQuery(start.lat, start.lon, radiusM, "relations"), Math.min(t, 15000), st),
+  ]);
+  if (ways.status === "rejected") throw ways.reason;
+  const raw = [...parseRaw(ways.value.json), ...(rels.status === "fulfilled" ? parseRaw(rels.value.json) : [])];
+  const anchors = clusterAnchors(raw, start);
+  const relInfo = rels.status === "fulfilled" ? "z dużymi parkami" : "bez dużych parków (relacje niedostępne)";
+  return { anchors, info: `${anchors.length} miejsc, serwer ${ways.value.from}, ${relInfo}` };
 }
 
 // ---------------- loop candidates through anchors ----------------
