@@ -1,5 +1,6 @@
 /** Telegram Bot API, called directly (no Composio). */
 
+import { handleCallback, routeDietMessage } from "./diet";
 import { AWAY_KM, NEAR_HOME_KM, distKm } from "./location";
 
 const API = "https://api.telegram.org";
@@ -58,14 +59,28 @@ function timingSafeEqual(a: string, b: string) {
   return r === 0;
 }
 
-export async function handleTelegramWebhook(request: Request, env: Env): Promise<Response> {
+export async function handleTelegramWebhook(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
   const got = request.headers.get("X-Telegram-Bot-Api-Secret-Token") ?? "";
   if (!timingSafeEqual(got, await webhookSecret(env))) return new Response("forbidden", { status: 403 });
 
   const update: any = await request.json().catch(() => null);
+
+  // Dietetyk: przyciski pod wiadomościami (callback_query).
+  if (update?.callback_query) {
+    const cq = update.callback_query;
+    if (String(cq.message?.chat?.id) !== String(env.TELEGRAM_CHAT_ID)) return new Response("ok");
+    if (await coach(env).firstSeen("update", String(update.update_id))) ctx.waitUntil(handleCallback(env, cq));
+    return new Response("ok");
+  }
+
   const msg = update?.message ?? update?.edited_message;
   if (!msg) return new Response("ok");
   if (String(msg.chat?.id) !== String(env.TELEGRAM_CHAT_ID)) return new Response("ok"); // ignore strangers
+
+  // Dietetyk: zdjęcia, komendy dietetyczne, odpowiedzi na wiadomości z posiłkami. Telegram ponawia
+  // niepotwierdzone aktualizacje, więc najpierw deduplikacja po update_id.
+  if (!(await coach(env).firstSeen("update", String(update.update_id)))) return new Response("ok");
+  if (await routeDietMessage(env, msg, Boolean(update.edited_message), ctx)) return new Response("ok");
 
   let text: string = msg.text ?? msg.caption ?? "";
   if (!text && msg.location) {
@@ -87,7 +102,6 @@ export async function handleTelegramWebhook(request: Request, env: Env): Promise
   }
   if (!text) {
     if (msg.voice) text = "[Jan wysłał wiadomość głosową; trener jej nie odsłuchuje, poproś o tekst]";
-    else if (msg.photo) text = "[Jan wysłał zdjęcie bez opisu]";
     else if (msg.sticker) text = `[naklejka ${msg.sticker.emoji ?? ""}]`;
     else return new Response("ok");
   }

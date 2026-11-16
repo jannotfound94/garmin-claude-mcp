@@ -2,6 +2,12 @@ import { DurableObject } from "cloudflare:workers";
 import { fmtWarsaw } from "./time";
 import type { GarminToken } from "./garmin";
 import type { LatLon, RouteProposal } from "./routes";
+import { DEFAULT_CONFIG, type Meal, type NutritionConfig, type Weight, dateOfMealId } from "./nutrition";
+
+export interface Favorite {
+  name: string;
+  items: Meal["items"];
+}
 
 /**
  * The coach's memory. One Durable Object instance ("jan") holds everything, so updates from the
@@ -242,6 +248,110 @@ export class CoachState extends DurableObject<Env> {
     await this.ctx.storage.put("proposals", list);
   }
 
+  // ---------- dietetyk (posiłki, waga, ulubione, przypomnienia) ----------
+  // Posiłki leżą pod kluczem na dzień ("nut:meals:YYYY-MM-DD"), żeby wartość nigdy nie urosła ponad limit.
+
+  async getNutCfg(): Promise<NutritionConfig> {
+    const c = await this.ctx.storage.get<Partial<NutritionConfig>>("nut:cfg");
+    return { ...DEFAULT_CONFIG, ...c, carbsPerKg: { ...DEFAULT_CONFIG.carbsPerKg, ...c?.carbsPerKg } };
+  }
+  async patchNutCfg(patch: Partial<NutritionConfig>): Promise<NutritionConfig> {
+    const next = { ...(await this.getNutCfg()), ...patch };
+    await this.ctx.storage.put("nut:cfg", next);
+    return next;
+  }
+
+  async getMeals(date: string): Promise<Meal[]> {
+    return (await this.ctx.storage.get<Meal[]>(`nut:meals:${date}`)) ?? [];
+  }
+  async getMealsRange(dates: string[]): Promise<Record<string, Meal[]>> {
+    const out: Record<string, Meal[]> = {};
+    const got = await this.ctx.storage.get<Meal[]>(dates.map((d) => `nut:meals:${d}`));
+    for (const d of dates) out[d] = got.get(`nut:meals:${d}`) ?? [];
+    return out;
+  }
+  async findMeal(id: string): Promise<Meal | null> {
+    const date = dateOfMealId(id);
+    return date ? ((await this.getMeals(date)).find((m) => m.id === id) ?? null) : null;
+  }
+  async saveMeal(meal: Meal) {
+    const list = await this.getMeals(meal.date);
+    const i = list.findIndex((m) => m.id === meal.id);
+    if (i >= 0) list[i] = meal;
+    else list.push(meal);
+    list.sort((a, b) => a.time.localeCompare(b.time) || a.createdAt.localeCompare(b.createdAt));
+    await this.ctx.storage.put(`nut:meals:${meal.date}`, list);
+  }
+  async deleteMeal(id: string): Promise<boolean> {
+    const date = dateOfMealId(id);
+    if (!date) return false;
+    const list = await this.getMeals(date);
+    const next = list.filter((m) => m.id !== id);
+    if (next.length === list.length) return false;
+    await this.ctx.storage.put(`nut:meals:${date}`, next);
+    return true;
+  }
+
+  async addWeight(w: Weight) {
+    const list = ((await this.ctx.storage.get<Weight[]>("nut:weights")) ?? []).filter((x) => x.date !== w.date);
+    list.push(w);
+    list.sort((a, b) => a.date.localeCompare(b.date));
+    await this.ctx.storage.put("nut:weights", list.slice(-400));
+  }
+  async getWeights(): Promise<Weight[]> {
+    return (await this.ctx.storage.get<Weight[]>("nut:weights")) ?? [];
+  }
+
+  async getFavorites(): Promise<Favorite[]> {
+    return (await this.ctx.storage.get<Favorite[]>("nut:favs")) ?? [];
+  }
+  async addFavorite(f: Favorite): Promise<void> {
+    const list = (await this.getFavorites()).filter((x) => x.name.toLowerCase() !== f.name.toLowerCase());
+    list.push(f);
+    await this.ctx.storage.put("nut:favs", list.slice(-30));
+  }
+  async removeFavorite(index: number): Promise<boolean> {
+    const list = await this.getFavorites();
+    if (index < 0 || index >= list.length) return false;
+    list.splice(index, 1);
+    await this.ctx.storage.put("nut:favs", list);
+    return true;
+  }
+
+  /** Stan przypomnień: "YYYY-MM-DD|slot" -> sent | sent2 | ok | skip | snooze:ISO. Stare dni są usuwane. */
+  async getReminders(): Promise<Record<string, string>> {
+    return (await this.ctx.storage.get<Record<string, string>>("nut:rem")) ?? {};
+  }
+  async setReminders(patch: Record<string, string>, today: string) {
+    const cur = await this.getReminders();
+    const next: Record<string, string> = {};
+    const oldest = prevDay(today);
+    for (const [k, v] of Object.entries({ ...cur, ...patch })) if (k.slice(0, 10) >= oldest) next[k] = v;
+    await this.ctx.storage.put("nut:rem", next);
+  }
+
+  /** Wiadomość bota z posiłkiem -> id posiłku (odpowiedź Jana na nią = korekta). */
+  async rememberMealMessage(messageId: number, mealId: string) {
+    const map = (await this.ctx.storage.get<Record<string, string>>("nut:msgmap")) ?? {};
+    map[String(messageId)] = mealId;
+    const keys = Object.keys(map);
+    for (const k of keys.slice(0, Math.max(0, keys.length - 120))) delete map[k];
+    await this.ctx.storage.put("nut:msgmap", map);
+  }
+  async mealForMessage(messageId: number): Promise<string | null> {
+    return ((await this.ctx.storage.get<Record<string, string>>("nut:msgmap")) ?? {})[String(messageId)] ?? null;
+  }
+
+  /** Deduplikacja aktualizacji Telegrama (ponowienia) i albumów zdjęć. True = nowe. */
+  async firstSeen(kind: "update" | "group", id: string): Promise<boolean> {
+    const key = `nut:seen:${kind}`;
+    const seen = (await this.ctx.storage.get<string[]>(key)) ?? [];
+    if (seen.includes(id)) return false;
+    seen.push(id);
+    await this.ctx.storage.put(key, seen.slice(-60));
+    return true;
+  }
+
   /** Manual wake-up from the setup page. */
   async wakeNow(reason: string) {
     await this.queueWake([reason], 0);
@@ -272,4 +382,10 @@ export async function fireRoutine(env: Env, reasons: string[]): Promise<{ ok: bo
   } catch (e) {
     return { ok: false, retry: true, info: String(e) };
   }
+}
+
+function prevDay(date: string): string {
+  const d = new Date(`${date}T12:00:00Z`);
+  d.setUTCDate(d.getUTCDate() - 1);
+  return d.toISOString().slice(0, 10);
 }

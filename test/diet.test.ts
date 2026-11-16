@@ -1,0 +1,156 @@
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import {
+  DEFAULT_CONFIG, classifyDay, computeTargets, estimateTdee, evaluateReminders, labelForTime, normalizeItem,
+  overallConfidence, parseSlots, satisfiedSlots, slotKey, slotsFor, sumMacros, weightSlopePerDay, weightStats, dateOfMealId, newMealId,
+} from "../src/nutrition";
+import { parseAnalysis, applyBarcode } from "../src/gemini";
+
+const S = (t: string): any => (parseSlots(t) as any).slots;
+const cfg = { ...DEFAULT_CONFIG, slots: S("śniadanie 07:30; obiad 13:30; kolacja 19:30") };
+const mins = (t: string) => Number(t.slice(0, 2)) * 60 + Number(t.slice(3));
+const ev = (o: any) => evaluateReminders({ cfg, date: "2026-11-16", weekday: "Mon", state: {}, nowIso: "2026-11-16T10:00:00Z", ...o });
+
+test("parseSlots", () => {
+  assert.deepEqual(parseSlots("Drugie śniadanie 10.15, obiad 13:30"), { slots: [{ name: "Drugie śniadanie", time: "10:15" }, { name: "obiad", time: "13:30" }] });
+  assert.ok("error" in parseSlots("obiad 25:00"));
+  assert.ok("error" in parseSlots("13:30"));
+  assert.ok("error" in parseSlots("obiad 12:00; Obiad 13:00"));
+  assert.equal(slotKey("Drugie śniadanie"), "drugiesniadani"); // ucięte do 14 znaków (limit callback_data)
+  assert.ok("error" in parseSlots("Bardzo długie śniadanie A 08:00; Bardzo długie śniadanie B 09:00")); // kolizja skróconych kluczy
+});
+
+test("normalizeItem: macros override inconsistent kcal, alcohol counted, junk rejected", () => {
+  const a = normalizeItem({ name: "x", kcal: 100, protein_g: 30, carbs_g: 50, fat_g: 20 })!; // 4*30+4*50+9*20=500
+  assert.equal(a.kcal, 500);
+  const b = normalizeItem({ name: "piwo", kcal: 150, protein_g: 1, carbs_g: 12, fat_g: 0, alcohol_g: 14 })!; // 4+48+98=150
+  assert.equal(b.kcal, 150);
+  const c = normalizeItem({ name: "ok", kcal: 520, protein_g: 33, carbs_g: 3, fat_g: 41 })!; // 132+12+369=513
+  assert.equal(c.kcal, 520);
+  assert.equal(normalizeItem({ name: "", kcal: 1, protein_g: 1, carbs_g: 1, fat_g: 1 }), null);
+  assert.equal(normalizeItem({ name: "z", kcal: 1, protein_g: "abc", carbs_g: 1, fat_g: 1 }), null);
+  assert.equal(normalizeItem({ name: "z", kcal: 1, protein_g: "1,5", carbs_g: 1, fat_g: 1 })!.protein, 1.5);
+});
+
+test("reminders: nothing before plan+3h, one after, never twice", () => {
+  assert.equal(ev({ nowMin: mins("10:29"), meals: [] }).due.length, 0);
+  const r = ev({ nowMin: mins("10:30"), meals: [] });
+  assert.equal(r.due.length, 1);
+  assert.equal(r.due[0].slot.name, "śniadanie");
+  assert.equal(r.due[0].attempt, 1);
+  assert.equal(ev({ nowMin: mins("10:45"), meals: [], state: { "2026-11-16|sniadanie": "sent" } }).due.length, 0);
+});
+test("reminders: logged meal satisfies the slot (also eaten up to 90 min early)", () => {
+  const r = ev({ nowMin: mins("10:30"), meals: [{ time: "08:10" }] });
+  assert.equal(r.due.length, 0);
+  assert.deepEqual(r.markOk, ["2026-11-16|sniadanie"]);
+  assert.equal(ev({ nowMin: mins("10:30"), meals: [{ time: "06:10" }] }).due.length, 0);
+  assert.equal(ev({ nowMin: mins("10:30"), meals: [{ time: "05:55" }] }).due.length, 1); // za wcześnie na to okno
+});
+test("reminders: one meal satisfies only one slot", () => {
+  const c2 = { ...cfg, slots: S("A 08:00; B 09:00") };
+  const done = satisfiedSlots(slotsFor(c2, "Mon"), [{ time: "08:30" }], 180);
+  assert.equal(done.size, 1);
+});
+test("reminders: snooze -> second reminder once, skip/ok final, late dinner capped at 21:45", () => {
+  const st = { "2026-11-16|sniadanie": "snooze:2026-11-16T10:00:00.000Z" };
+  assert.equal(ev({ nowMin: mins("11:00"), meals: [], state: st, nowIso: "2026-11-16T09:59:00.000Z" }).due.length, 0);
+  const r = ev({ nowMin: mins("11:00"), meals: [], state: st, nowIso: "2026-11-16T10:01:00.000Z" });
+  assert.equal(r.due[0].attempt, 2);
+  assert.equal(ev({ nowMin: mins("11:00"), meals: [], state: { "2026-11-16|sniadanie": "skip" } }).due.length, 0);
+  const late = { ...cfg, slots: S("kolacja 20:30") };
+  assert.equal(ev({ cfg: late, nowMin: mins("21:44"), meals: [] }).due.length, 0);
+  assert.equal(ev({ cfg: late, nowMin: mins("21:45"), meals: [] }).due.length, 1);
+  assert.equal(ev({ cfg: { ...cfg, remindersOn: false }, nowMin: mins("12:00"), meals: [] }).due.length, 0);
+});
+test("weekend schedule overrides, empty falls back", () => {
+  const c = { ...cfg, weekendSlots: S("brunch 10:00") };
+  assert.equal(slotsFor(c, "Sat")[0].name, "brunch");
+  assert.equal(slotsFor(c, "Fri")[0].name, "śniadanie");
+  assert.equal(slotsFor(cfg, "Sun")[0].name, "śniadanie");
+  assert.equal(labelForTime(cfg.slots, "07:50"), "śniadanie");
+  assert.equal(labelForTime(cfg.slots, "16:00"), "obiad"); // w oknie obiadu (13:30 + 3 h)
+  assert.equal(labelForTime(cfg.slots, "17:00"), "Przekąska");
+});
+
+test("classifyDay", () => {
+  assert.equal(classifyDay([], []).type, "rest");
+  assert.equal(classifyDay([{ type: "Run", category: "WORKOUT", name: "Bieg spokojny 6 km", distance: 6000 }], []).type, "easy");
+  assert.equal(classifyDay([{ type: "Run", category: "WORKOUT", name: "Długi bieg 22 km", distance: 22000 }], []).type, "long");
+  assert.equal(classifyDay([{ type: "Run", category: "WORKOUT", name: "Tempo", description: "Main Set\n- 5x1km" }], []).type, "quality");
+  assert.equal(classifyDay([{ type: "Run", category: "WORKOUT", name: "Bieg spokojny 8 km" }], [{ type: "Run", distance: 18000, moving_time: 7000 }]).type, "long");
+  assert.equal(classifyDay([{ type: "Ride", category: "WORKOUT", name: "Rower" }], [{ type: "WeightTraining" }]).type, "rest");
+  assert.equal(classifyDay([{ category: "NOTE", type: "Run", name: "Długi" }], []).type, "rest");
+});
+
+test("targets: g/kg, deficit only easy/rest, carbs floor", () => {
+  const t = computeTargets(DEFAULT_CONFIG, 80, "rest")!;
+  assert.deepEqual([t.protein, t.carbs, t.fat], [144, 280, 80]);
+  assert.equal(t.kcal, Math.round(144 * 4 + 280 * 4 + 80 * 9));
+  const d = { ...DEFAULT_CONFIG, deficitKcal: 400 };
+  assert.equal(computeTargets(d, 80, "easy")!.carbs, Math.round(360 - 100));
+  assert.equal(computeTargets(d, 80, "long")!.carbs, 560);
+  assert.match(computeTargets(d, 80, "long")!.note!, /bez deficytu/);
+  const big = computeTargets({ ...DEFAULT_CONFIG, deficitKcal: 700 }, 80, "rest")!; // 280 - 175 = 105 < floor 200 -> cut to 200
+  assert.equal(big.carbs, 200);
+  assert.ok(big.deficitApplied < 700 && big.note);
+  assert.equal(computeTargets(DEFAULT_CONFIG, null, "rest"), null);
+});
+
+test("weight stats and TDEE calibration", () => {
+  const today = "2026-11-16";
+  const day = (n: number) => new Date(Date.parse(`${today}T12:00:00Z`) - n * 86400000).toISOString().slice(0, 10);
+  // waga spada o 0.5 kg/tydz.; jemy po 2500 kcal -> TDEE ≈ 2500 + 0.5/7*7700 = 3050
+  const weights = Array.from({ length: 29 }, (_, i) => ({ date: day(28 - i), kg: 80 - (0.5 / 7) * i }));
+  const slope = weightSlopePerDay(weights, today, 28)!;
+  assert.ok(Math.abs(slope * 7 + 0.5) < 0.01);
+  const intake = Array.from({ length: 28 }, (_, i) => ({ date: day(27 - i), kcal: 2500, meals: 3 }));
+  const e: any = estimateTdee(intake, weights, today);
+  assert.equal(e.ready, true);
+  assert.ok(Math.abs(e.tdeeKcal - 3050) <= 2, String(e.tdeeKcal));
+  assert.equal((estimateTdee(intake.slice(-10), weights, today) as any).ready, false);
+  assert.equal((estimateTdee(intake, weights.slice(-3), today) as any).ready, false);
+  const s = weightStats(weights, today);
+  assert.equal(s.last!.date, today);
+  assert.ok(s.deltaWeek! < 0);
+});
+
+test("meal ids carry the date", () => {
+  const id = newMealId("2026-11-16");
+  assert.equal(dateOfMealId(id), "2026-11-16");
+  assert.equal(dateOfMealId("garbage"), null);
+});
+
+test("confidence weighted by kcal", () => {
+  const it = (kcal: number, confidence: any) => normalizeItem({ name: "x", kcal, protein_g: kcal / 4, carbs_g: 0, fat_g: 0, confidence })!;
+  assert.equal(overallConfidence([it(600, "high"), it(20, "low")]), "high");
+  assert.equal(overallConfidence([it(300, "high"), it(300, "low")]), "low");
+  assert.equal(sumMacros([it(100, "high"), it(50, "high")]).kcal, 150);
+});
+
+test("parseAnalysis: valid, thought parts ignored, empty/invalid throw", () => {
+  const body = { is_food: true, meal_label: "Jajecznica", eaten_time: "8:05", day_offset: -1, barcode: "5900000000000", items: [{ name: "jajka", grams: 150, kcal: 220, protein_g: 18, carbs_g: 1, fat_g: 16, confidence: "medium", basis: "estimate" }], question: null, comment: "ok" };
+  const a = parseAnalysis({ candidates: [{ content: { parts: [{ text: "hmm", thought: true }, { text: JSON.stringify(body) }] } }] }, "m");
+  assert.equal(a.isFood, true);
+  assert.equal(a.eatenTime, "08:05");
+  assert.equal(a.dayOffset, -1);
+  assert.equal(a.barcode, "5900000000000");
+  assert.equal(a.items.length, 1);
+  assert.equal(parseAnalysis({ candidates: [{ content: { parts: [{ text: JSON.stringify({ ...body, eaten_time: null, day_offset: -1 }) }] } }] }, "m").dayOffset, 0);
+  assert.equal(parseAnalysis({ candidates: [{ content: { parts: [{ text: JSON.stringify({ is_food: false, meal_label: "", items: [] }) }] } }] }, "m").isFood, false);
+  assert.throws(() => parseAnalysis({ candidates: [{ finishReason: "SAFETY" }] }, "m"), /SAFETY/);
+  assert.throws(() => parseAnalysis({ candidates: [{ content: { parts: [{ text: "{ucięty" }] } }] }, "m"), /JSON/);
+});
+
+test("applyBarcode only for single-item meals", async () => {
+  const two = [normalizeItem({ name: "a", kcal: 100, protein_g: 5, carbs_g: 10, fat_g: 3 })!, normalizeItem({ name: "b", kcal: 100, protein_g: 5, carbs_g: 10, fat_g: 3 })!];
+  assert.equal((await applyBarcode(two, "5900000000000")).used, null);
+  const orig = globalThis.fetch;
+  globalThis.fetch = (async () => new Response(JSON.stringify({ status: 1, product: { product_name: "Skyr", nutriments: { "energy-kcal_100g": 63, proteins_100g: 11, carbohydrates_100g: 4, fat_100g: 0.2 } } }))) as any;
+  const one = [normalizeItem({ name: "skyr", grams: 150, kcal: 120, protein_g: 10, carbs_g: 6, fat_g: 1 })!];
+  const r = await applyBarcode(one, "5900000000000");
+  globalThis.fetch = orig;
+  assert.equal(r.used, "Skyr");
+  assert.equal(r.items[0].basis, "label");
+  assert.ok(Math.abs(r.items[0].protein - 16.5) < 0.01);
+});

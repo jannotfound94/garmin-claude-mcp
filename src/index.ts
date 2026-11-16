@@ -4,7 +4,9 @@ import { z } from "zod";
 import OAuthProvider from "@cloudflare/workers-oauth-provider";
 import TRENER from "../coach/TRENER.md";
 import { Icu, compactActivity, compactEvent, compactIntervals, compactWellness, computeSplits } from "./icu";
-import { GarminPersonal, capJson } from "./garmin";
+import { capJson } from "./garmin";
+import { garminClient, nutritionReport } from "./diet";
+import { pingGemini } from "./gemini";
 import { runScheduler } from "./scheduler";
 import { distKm, resolveLocation } from "./location";
 import { fetchForecast } from "./weather";
@@ -16,12 +18,6 @@ import { addDays, daysBetween, fmtWarsaw, warsaw, warsawToUtc } from "./time";
 export { CoachState } from "./state";
 
 const MARATHON_DATE = "2027-04-25";
-
-function garminClient(env: Env): GarminPersonal | null {
-  if (!env.GARMIN_PERSONAL_API_KEY) return null;
-  const state = coach(env);
-  return new GarminPersonal(env.GARMIN_PERSONAL_API_KEY, () => state.getGarminToken(), (t) => state.setGarminToken(t));
-}
 
 /** Home by default; a location shared on Telegram overrides it for a while (see location.ts). */
 async function currentLocation(env: Env) {
@@ -278,6 +274,45 @@ export class MyMCP extends McpAgent<Env> {
       },
     );
 
+    // ---------------- dietetyk ----------------
+
+    this.server.tool(
+      "getNutrition",
+      "Dietetyk: posiłki Jana (zapisane z jego zdjęć i opisów na Telegramie) z podsumowaniem. Zwraca: typ dnia (z planu i aktywności) i cele kcal/makro, dzisiejsze spożycie z listą posiłków i tym, co zostało, status posiłków z planu (zapisany/pominięty/brak wpisu), dni wstecz (days, domyślnie 1, max 14) ze spożyciem vs spalone kcal z Garmina, średnią 7 dni, wagę i trend, kalibrację rzeczywistego zapotrzebowania (po ok. 3 tygodniach danych). Liczby są policzone przez serwer: nie przeliczaj ich ponownie, tylko interpretuj.",
+      { days: z.number().optional().describe("Ile dni wstecz łącznie z dzisiejszym, domyślnie 1, max 14") },
+      async ({ days = 1 }) => text(await nutritionReport(this.env, days)),
+    );
+
+    this.server.tool(
+      "setNutritionConfig",
+      "Zmienia ustawienia dietetyka Jana, gdy sam o to poprosi lub gdy ustalicie cel (np. redukcja). Zmieniaj tylko to, co wynika z rozmowy. Deficyt dotyczy wyłącznie dni bez biegu i łatwych; w dni akcentów i długich biegów serwer go ignoruje.",
+      {
+        deficitKcal: z.number().min(0).max(700).optional().describe("Dzienny deficyt kcal (0 = utrzymanie)"),
+        proteinPerKg: z.number().min(1.2).max(2.5).optional(),
+        fatPerKg: z.number().min(0.6).max(1.5).optional(),
+        carbsPerKg: z
+          .object({
+            rest: z.number().min(2).max(10).optional(),
+            easy: z.number().min(2).max(10).optional(),
+            quality: z.number().min(2).max(10).optional(),
+            long: z.number().min(2).max(10).optional(),
+          })
+          .optional()
+          .describe("g węglowodanów na kg wg typu dnia"),
+        remindAfterMin: z.number().min(30).max(360).optional().describe("Po ilu minutach od planowanej godziny posiłku przypomnieć"),
+      },
+      async (patch) => {
+        const st = coach(this.env);
+        const cur = await st.getNutCfg();
+        const { carbsPerKg, ...rest } = patch;
+        const next = await st.patchNutCfg({
+          ...rest,
+          ...(carbsPerKg ? { carbsPerKg: { ...cur.carbsPerKg, ...Object.fromEntries(Object.entries(carbsPerKg).filter(([, v]) => v !== undefined)) } } : {}),
+        });
+        return text({ deficyt_kcal: next.deficitKcal, bialko_g_na_kg: next.proteinPerKg, tluszcz_g_na_kg: next.fatPerKg, weglowodany_g_na_kg: next.carbsPerKg, przypomnienie_po_min: next.remindAfterMin });
+      },
+    );
+
     // ---------------- coach agent ----------------
 
     this.server.tool(
@@ -342,6 +377,7 @@ export class MyMCP extends McpAgent<Env> {
             };
           })(),
           telegram_skonfigurowany: Boolean(this.env.TELEGRAM_BOT_TOKEN && this.env.TELEGRAM_CHAT_ID),
+          dietetyk_wlaczony: Boolean(this.env.GEMINI_API_KEY),
           trasy: await (async () => {
             const { home, last } = await coach(this.env).getRouteSettings();
             const props = await coach(this.env).listProposals();
@@ -455,6 +491,7 @@ async function setupPage(env: Env, password: string, notice: string) {
   </ul>
   <p>Ostatnie pobudki trenera:</p><ul>${fires || "<li>brak</li>"}</ul>
   ${await garminSection(env, password)}
+  ${await dietSection(env, password)}
   <form method="post">
     <input type="hidden" name="password" value="${esc(password)}">
     ${btn("connect", "1. Podłącz Telegram (webhook) i wyślij wiadomość testową")}<br>
@@ -472,6 +509,17 @@ async function garminSection(env: Env, password: string) {
     <form method="post">${hidden}${btn("garmin_test", "Sprawdź dane z Garmin Connect")}</form>`
     : `<p>❌ Brak klucza. Utwórz „Osobisty klucz API” w Garmin Connect (przeglądarka) i wpisz go w Cloudflare jako sekret <code>GARMIN_PERSONAL_API_KEY</code>.</p>`;
   return `<h3>Garmin Connect</h3>${body}${await routesSection(env, password)}`;
+}
+
+async function dietSection(env: Env, password: string) {
+  const hidden = `<input type="hidden" name="password" value="${esc(password)}">`;
+  const cfg = await coach(env).getNutCfg();
+  const slots = (l: { name: string; time: string }[]) => l.map((s) => `${esc(s.name)} ${s.time}`).join("; ");
+  return `<h3>Dietetyk</h3>
+  <ul><li>${env.GEMINI_API_KEY ? "✅" : "❌"} GEMINI_API_KEY (darmowy klucz z aistudio.google.com) · model: ${esc(env.GEMINI_MODEL || "gemini-2.5-flash")}, zapasowy: ${esc(env.GEMINI_FALLBACK_MODEL || "gemini-2.5-flash-lite")}</li>
+  <li>Plan posiłków pn–pt: ${cfg.slots.length ? slots(cfg.slots) : "brak (ustaw na Telegramie: /posilki)"}${cfg.weekendSlots.length ? ` · weekend: ${slots(cfg.weekendSlots)}` : ""}</li>
+  <li>Przypomnienia: ${cfg.remindersOn ? "włączone" : "wyłączone"}</li></ul>
+  <form method="post">${hidden}${btn("gemini_test", "Sprawdź Gemini (test na opisie tekstowym)")}</form>`;
 }
 
 async function routesSection(env: Env, password: string) {
@@ -515,7 +563,7 @@ async function handleSetup(request: Request, env: Env, origin: string): Promise<
         await tg(env, "setWebhook", {
           url: `${origin}/telegram`,
           secret_token: await webhookSecret(env),
-          allowed_updates: ["message", "edited_message"],
+          allowed_updates: ["message", "edited_message", "callback_query"],
           drop_pending_updates: false,
         });
         await sendTelegram(env, "Trener podłączony ✅ Od teraz odpowiadam na Twoje wiadomości na bieżąco.");
@@ -586,6 +634,9 @@ async function handleSetup(request: Request, env: Env, origin: string): Promise<
         notice = `Garmin Connect działa ✅ Wczoraj i dziś: ${capJson(d, 1500)}`;
         break;
       }
+      case "gemini_test":
+        notice = `Gemini działa ✅ ${await pingGemini(env)}`;
+        break;
       case "disconnect":
         await tg(env, "deleteWebhook", { drop_pending_updates: false });
         notice = "Webhook usunięty.";
@@ -598,13 +649,13 @@ async function handleSetup(request: Request, env: Env, origin: string): Promise<
 }
 
 const defaultHandler = {
-  async fetch(request: Request, env: Env) {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext) {
     const url = new URL(request.url);
     const html = { "content-type": "text/html;charset=utf-8" };
 
     if (url.pathname === "/telegram" && request.method === "POST") {
       await coach(env).setOrigin(url.origin);
-      return handleTelegramWebhook(request, env);
+      return handleTelegramWebhook(request, env, ctx);
     }
     const route = /^\/trasa\/([a-f0-9]{16})\/([A-Z])(\.gpx)?$/.exec(url.pathname);
     if (route) {

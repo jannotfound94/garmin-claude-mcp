@@ -1,3 +1,4 @@
+import { runDietReminders } from "./diet";
 import { Icu, compactActivity } from "./icu";
 import { coach } from "./telegram";
 import { addDays, fmtWarsaw, warsaw } from "./time";
@@ -10,6 +11,13 @@ import { addDays, fmtWarsaw, warsaw } from "./time";
 const PULSES: { name: string; reason: string; at: (weekday: string) => string }[] = [
   { name: "poranek", reason: "PORANNY_PRZEGLAD", at: (wd) => (wd === "Sun" ? "07:30" : "06:45") },
   { name: "wieczor", reason: "WIECZORNY_PRZEGLAD", at: () => "20:15" },
+];
+
+// Dietetyk (tylko gdy włączony Gemini). W niedzielę dzienne i tygodniowe podsumowanie idą jedną pobudką.
+const NEVER = "99:99";
+const DIET_PULSES: { name: string; reason: string; at: (weekday: string) => string }[] = [
+  { name: "dieta_dzien", reason: "DIETA_PODSUMOWANIE_DNIA", at: () => "21:30" },
+  { name: "dieta_tydzien", reason: "DIETA_PODSUMOWANIE_TYGODNIA", at: (wd) => (wd === "Sun" ? "21:30" : NEVER) },
 ];
 
 const ACTIVE_FROM_HOUR = 6;
@@ -48,11 +56,18 @@ export async function runScheduler(env: Env) {
 
   // 2. Daily pulses.
   const mem = await state.getMemory();
-  for (const p of PULSES) {
+  for (const p of env.GEMINI_API_KEY ? [...PULSES, ...DIET_PULSES] : PULSES) {
     if (local.time >= p.at(local.weekday) && mem.pulses[p.name] !== local.date) {
       await state.markPulse(p.name, local.date);
       reasons.push(`${p.reason} (${local.weekdayPl})`);
     }
+  }
+
+  // 2b. Meal reminders (plain code, no AI).
+  try {
+    await runDietReminders(env);
+  } catch (e) {
+    console.error("diet reminders failed", e);
   }
 
   // 3. Check-ins the coach scheduled for itself.
