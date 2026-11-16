@@ -6,6 +6,7 @@ import {
   overallConfidence, parseSlots, satisfiedSlots, slotKey, slotsFor, sumMacros, weightSlopePerDay, weightStats, dateOfMealId, newMealId,
 } from "../src/nutrition";
 import { parseAnalysis, applyBarcode, analyzeMeal, GeminiTransientError } from "../src/gemini";
+import { greeting, recommend, type RecInput } from "../src/recommend";
 
 const S = (t: string): any => (parseSlots(t) as any).slots;
 const cfg = { ...DEFAULT_CONFIG, slots: S("śniadanie 07:30; obiad 13:30; kolacja 19:30") };
@@ -403,4 +404,82 @@ test("analyzeMeal failure classes: transient (503/429/timeout/truncated JSON) vs
     e = await run((m) => (m === "gemini-3.5-flash" ? new Response("gone", { status: 404 }) : new Response("overloaded", { status: 503 })));
     assert.ok(e && !(e instanceof GeminiTransientError));
   } finally { globalThis.fetch = orig; }
+});
+
+// ======================= rekomendacje =======================
+
+const baseInput = (o: Partial<RecInput> = {}): RecInput => ({
+  now: { date: "2026-12-11", hour: 18, minute: 0 },
+  food: { kcal: 1500, protein: 90, carbs: 150, fat: 50, mealsCount: 3, targets: { kcal: 2400, protein: 152, carbs: 280, fat: 76, deficit: 600 }, dayType: "easy", targetNote: null },
+  tomorrow: { dayType: "rest", events: [], known: true },
+  today: { planned: [], doneRun: false },
+  weather: { today: null, tomorrow: null },
+  recovery: null,
+  weight: { daysSinceWeighIn: 3, aheadKg: 0, requiredKgPerWeek: 0.5, toGoKg: 10, goalKg: 95 },
+  ...o,
+});
+const titles = (i: RecInput) => recommend(i).map((r) => r.title);
+const day = (win: any): any => ({ data: "2026-12-12", dzien: "sobota", wschod: "7:40", zachod: "15:30", temp_min_c: 0, temp_max_c: 5, opady_dzien_mm: 0, ocena_dnia: win.ocena, okna: { poranek: win, wieczor: win } });
+const win = (ocena: string, extra: any = {}) => ({ start: "07:00", ocena, temp_c: 3, odczuwalna_c: 1, opady_mm: 0, wiatr_kmh: 10, porywy_kmh: 15, ...extra });
+
+test("recommend: food rules (protein gap, over target, empty log, big gap late, carbs before long run, hard day fuel)", () => {
+  assert.ok(titles(baseInput()).some((t) => /Brakuje ok\. 62 g białka/.test(t)));
+  assert.ok(!titles(baseInput({ now: { date: "d", hour: 10, minute: 0 } })).some((t) => /Brakuje/.test(t)), "rano nie marudzi o białku");
+  assert.ok(titles(baseInput({ food: { ...baseInput().food, kcal: 2700 } })).includes("Lekko ponad cel"));
+  const empty = recommend(baseInput({ food: { ...baseInput().food, mealsCount: 0, kcal: 0, protein: 0, carbs: 0, fat: 0 }, now: { date: "d", hour: 12, minute: 5 } }));
+  assert.equal(empty[0].title, "Pusto w dzienniku");
+  assert.match(empty[0].text, /12:05/);
+  assert.ok(titles(baseInput({ now: { date: "d", hour: 21, minute: 0 }, food: { ...baseInput().food, kcal: 900 } })).includes("Zjadłeś mało"));
+  const long = titles(baseInput({ tomorrow: { dayType: "long", events: [{ name: "Długi bieg", km: 18 }], known: true } }));
+  assert.ok(long.some((t) => /Jutro długi bieg: dołóż węgli/.test(t)));
+  assert.ok(titles(baseInput({ food: { ...baseInput().food, dayType: "long" } })).includes("Dziś pełne paliwo"));
+  assert.ok(!titles(baseInput({ food: { ...baseInput().food, dayType: "easy" } })).includes("Dziś pełne paliwo"));
+  const raised = recommend(baseInput({ food: { ...baseInput().food, targetNote: "Cel podniesiony o ok. 800 kcal: Garmin pokazuje dziś większy wysiłek niż w planie." } }));
+  assert.ok(raised.some((r) => r.title === "Cel podniesiony"));
+  // bez celów (brak wagi) nie wymyśla liczb
+  assert.ok(!titles(baseInput({ food: { ...baseInput().food, targets: null } })).some((t) => /Brakuje|ponad|Zjadłeś/.test(t)));
+});
+
+test("recommend: training and weather (tomorrow bad weather first, evening alternative, run waiting, done run, free day)", () => {
+  const ev = { tomorrow: { dayType: "easy" as const, events: [{ name: "Bieg spokojny", km: 6 }], known: true } };
+  const bad = recommend(baseInput({ ...ev, weather: { today: null, tomorrow: { ...day(win("zla", { powody: ["ulewny deszcz"] })), okna: { poranek: win("zla", { powody: ["ulewny deszcz"] }), wieczor: win("dobra", { start: "17:00" }) } } } }));
+  assert.equal(bad[0].kind, "weather");
+  assert.equal(bad[0].priority, 1);
+  assert.match(bad[0].text, /ulewny deszcz/);
+  assert.match(bad[0].text, /Wieczorem wygląda lepiej/);
+  const ok = recommend(baseInput({ ...ev, weather: { today: null, tomorrow: day(win("dobra")) } }));
+  const plan = ok.find((r) => r.title === "Jutro w planie")!;
+  assert.match(plan.text, /Bieg spokojny, 6 km/);
+  assert.match(plan.text, /dobra, 3°C/);
+  // kilometry nie są dopisywane drugi raz, gdy nazwa treningu już je zawiera
+  const dup = recommend(baseInput({ tomorrow: { dayType: "easy" as const, events: [{ name: "Bieg spokojny 6 km", km: 6 }], known: true }, weather: { today: null, tomorrow: null } })).find((r) => r.title === "Jutro w planie")!;
+  assert.match(dup.text, /^Bieg spokojny 6 km\./);
+  assert.ok(!/6 km, 6 km/.test(dup.text));
+  const dec = recommend(baseInput({ tomorrow: { dayType: "easy" as const, events: [{ name: "Długi bieg", km: 10.5 }], known: true }, weather: { today: null, tomorrow: null } })).find((r) => r.title === "Jutro w planie")!;
+  assert.match(dec.text, /^Długi bieg, 10.5 km\./);
+  assert.ok(titles(baseInput()).includes("Jutro bez biegania"));
+  assert.ok(!titles(baseInput({ tomorrow: { dayType: "rest", events: [], known: false } })).includes("Jutro bez biegania"), "brak danych o planie: nie twierdzimy, że jutro wolne");
+  assert.ok(!titles(baseInput({ now: { date: "d", hour: 9, minute: 0 } })).includes("Jutro bez biegania"), "rano jeszcze nie zapowiada jutra");
+  const waiting = recommend(baseInput({ today: { planned: [{ name: "Bieg 5 km", km: 5 }], doneRun: false }, now: { date: "d", hour: 17, minute: 0 } }));
+  assert.ok(waiting.some((r) => r.title === "Dzisiejszy bieg jeszcze czeka"));
+  const late = recommend(baseInput({ today: { planned: [{ name: "Bieg 5 km", km: 5 }], doneRun: false }, now: { date: "d", hour: 20, minute: 0 } }));
+  assert.ok(late.some((r) => r.title === "Dzisiejszy bieg wisi" && /19:30/.test(r.text)));
+  assert.ok(titles(baseInput({ today: { planned: [], doneRun: true }, now: { date: "d", hour: 15, minute: 0 } })).includes("Po biegu"));
+  assert.ok(!titles(baseInput({ today: { planned: [{ name: "x", km: 5 }], doneRun: true }, now: { date: "d", hour: 20, minute: 0 } })).includes("Dzisiejszy bieg wisi"));
+});
+
+test("recommend: recovery and weight", () => {
+  const weak = recommend(baseInput({ recovery: { sleepH: 4.8, bbPeak: 28, hrvStatus: "BALANCED" }, today: { planned: [{ name: "Bieg", km: 5 }], doneRun: false }, now: { date: "d", hour: 9, minute: 0 } }));
+  assert.equal(weak[0].title, "Słaba regeneracja");
+  assert.match(weak[0].text, /lżej albo skróć/);
+  assert.ok(recommend(baseInput({ recovery: { sleepH: 7.5, bbPeak: 85, hrvStatus: "BALANCED" }, today: { planned: [{ name: "Bieg", km: 5 }], doneRun: false }, now: { date: "d", hour: 9, minute: 0 } })).some((r) => r.title === "Naładowany"));
+  assert.ok(!titles(baseInput({ recovery: { sleepH: 7, bbPeak: 60, hrvStatus: null } })).some((t) => /regeneracja|Naładowany/.test(t)));
+  assert.ok(titles(baseInput({ weight: { ...baseInput().weight, daysSinceWeighIn: null } })).includes("Podaj wagę"));
+  assert.ok(titles(baseInput({ weight: { ...baseInput().weight, daysSinceWeighIn: 14 } })).includes("Czas na ważenie"));
+  const behind = recommend(baseInput({ weight: { ...baseInput().weight, aheadKg: -2.4 } })).find((r) => r.title === "Lekko za planem")!;
+  assert.match(behind.text, /2,4|2.4/);
+  assert.ok(titles(baseInput({ weight: { ...baseInput().weight, aheadKg: 1.6 } })).includes("Przed planem"));
+  assert.ok(recommend(baseInput({ weight: { ...baseInput().weight, daysSinceWeighIn: null } })).length <= 7);
+  assert.match(greeting(8), /dzień dobry/);
+  assert.match(greeting(20), /jak minął dzień/);
 });

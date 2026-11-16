@@ -7,8 +7,10 @@ import { Icu, compactActivity, compactEvent, compactIntervals, compactWellness, 
 import { capJson } from "./garmin";
 import { garminClient, nutritionReport } from "./diet";
 import { DEFAULT_FALLBACK_MODEL, DEFAULT_MODEL, pingGemini } from "./gemini";
+import { handleApi } from "./api";
 import { runScheduler } from "./scheduler";
 import { distKm, resolveLocation } from "./location";
+import { currentLocation, weatherLocation } from "./loc";
 import { fetchForecast } from "./weather";
 import { geocode, mapPage, proposeLoops, toGpx } from "./routes";
 import { loadAnchors, warmAnchors } from "./anchors";
@@ -19,16 +21,6 @@ export { CoachState } from "./state";
 
 const MARATHON_DATE = "2027-04-25";
 const MARATHON_GOAL = { czas: "poniżej 4:30:00", tempo_srednie: "ok. 6:23/km", uwaga: "cel drugorzędny wobec ukończenia bez kontuzji" };
-
-/** Home by default; a location shared on Telegram overrides it for a while (see location.ts). */
-async function currentLocation(env: Env) {
-  const { home, last } = await coach(env).getRouteSettings();
-  return resolveLocation(home, last);
-}
-
-async function weatherLocation(env: Env) {
-  return (await currentLocation(env))?.point ?? null;
-}
 
 const NO_LOCATION = "Pogoda niedostępna: brak punktu startu (adres lub współrzędne na stronie /setup albo udostępniona lokalizacja).";
 
@@ -658,6 +650,11 @@ const defaultHandler = {
   async fetch(request: Request, env: Env, ctx: ExecutionContext) {
     const url = new URL(request.url);
     const html = { "content-type": "text/html;charset=utf-8" };
+
+    // Aplikacja: interfejs (PWA) jest serwowany jako pliki statyczne z public/app (patrz "assets" w wrangler.jsonc),
+    // a dane dla niej idą przez /api.
+    if (url.pathname.startsWith("/api/")) return handleApi(request, env);
+    if (url.pathname === "/") return Response.redirect(`${url.origin}/app/`, 302);
 
     if (url.pathname === "/telegram" && request.method === "POST") {
       await coach(env).setOrigin(url.origin);

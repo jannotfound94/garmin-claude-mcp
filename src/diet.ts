@@ -177,6 +177,51 @@ async function activeToday(env: Env, date: string): Promise<number | null> {
   return v;
 }
 
+/** Przegląd dnia dla aplikacji: typ dnia, cele, spożycie, posiłki ze składnikami i spalanie z Garmina. */
+export async function dayOverview(env: Env, date: string) {
+  const st = coach(env);
+  const [meals, info] = await Promise.all([st.getMeals(date), dayInfo(env, date)]);
+  const totals = sumMacros(meals.map((m) => m.totals));
+  let garmin: { resting: number | null; active: number | null; total: number | null; partial: boolean } | null = null;
+  const g = garminClient(env);
+  if (g) {
+    try {
+      const e = (await g.energy(date, date))[date];
+      if (e) garmin = { ...e, partial: date === warsaw().date };
+    } catch {
+      /* Garmin opcjonalny */
+    }
+  }
+  const t = info.targets;
+  return {
+    date,
+    dayType: info.dayType,
+    dayTypeLabel: DAY_TYPE_PL[info.dayType],
+    dayTypeWhy: info.dayTypeWhy,
+    runKm: info.runKm,
+    weightKg: info.weightKg,
+    targets: t ? { kcal: t.kcal, protein: t.protein, carbs: t.carbs, fat: t.fat, deficit: t.deficitApplied, source: t.source, note: t.note } : null,
+    totals,
+    left: t ? { kcal: t.kcal - totals.kcal, protein: t.protein - totals.protein, carbs: t.carbs - totals.carbs, fat: t.fat - totals.fat } : null,
+    meals: meals.map((m) => ({
+      id: m.id,
+      time: m.time,
+      label: m.label,
+      slot: m.slot ?? null,
+      source: m.source,
+      confidence: m.confidence,
+      note: m.note,
+      question: m.question,
+      totals: m.totals,
+      items: m.items.map((i) => ({ name: i.name, grams: i.grams, kcal: i.kcal, protein: i.protein, carbs: i.carbs, fat: i.fat, confidence: i.confidence, label: i.basis === "label" })),
+    })),
+    garmin,
+    activeTodayKcal: info.activeTodayKcal,
+    baseSource: info.base?.source ?? null,
+    deficitKcal: info.cfg.deficitKcal,
+  };
+}
+
 const pl = (n: number) => String(n).replace(".", ",");
 const sign = (n: number) => (n > 0 ? `+${r0(n)}` : `${r0(n)}`);
 
@@ -240,19 +285,19 @@ const mealButtons = (id: string) => [
 
 // ---------------- zapis posiłku ----------------
 
-async function slotNamesFor(env: Env, date: string): Promise<string[]> {
+export async function slotNamesFor(env: Env, date: string): Promise<string[]> {
   const cfg = await coach(env).getNutCfg();
   return slotsFor(cfg, weekdayOf(date)).map((x) => x.name);
 }
 
-interface MealCtx {
+export interface MealCtx {
   source: Meal["source"];
   note: string;
   photoFileId?: string;
   msgUnix: number;
 }
 
-async function storeAndAnnounce(env: Env, a: Awaited<ReturnType<typeof analyzeMeal>>, c: MealCtx) {
+export async function buildAndSaveMeal(env: Env, a: Awaited<ReturnType<typeof analyzeMeal>>, c: MealCtx): Promise<{ meal: Meal; slotName: string; extra: string[] }> {
   const st = coach(env);
   const at = warsaw(new Date(c.msgUnix * 1000));
   const date = a.dayOffset === -1 ? addDays(at.date, -1) : at.date;
@@ -276,11 +321,20 @@ async function storeAndAnnounce(env: Env, a: Awaited<ReturnType<typeof analyzeMe
     createdAt: new Date().toISOString(),
   };
   await st.saveMeal(meal);
-  await announce(env, meal, slotName, [
-    ...(used ? [`🏷 Wartości z bazy Open Food Facts: ${used}`] : []),
-    ...(a.comment ? [`💬 ${a.comment}`] : []),
-    ...(date !== at.date ? [`📅 Zapisano na ${date}.`] : []),
-  ]);
+  return {
+    meal,
+    slotName,
+    extra: [
+      ...(used ? [`🏷 Wartości z bazy Open Food Facts: ${used}`] : []),
+      ...(a.comment ? [`💬 ${a.comment}`] : []),
+      ...(date !== at.date ? [`📅 Zapisano na ${date}.`] : []),
+    ],
+  };
+}
+
+async function storeAndAnnounce(env: Env, a: Awaited<ReturnType<typeof analyzeMeal>>, c: MealCtx) {
+  const r = await buildAndSaveMeal(env, a, c);
+  await announce(env, r.meal, r.slotName, r.extra);
 }
 
 async function announce(env: Env, meal: Meal, slotName: string, extra: string[] = []) {
@@ -356,15 +410,17 @@ async function logText(env: Env, unix: number, text: string, run: MealRun) {
   await storeAndAnnounce(env, a, { source: "text", note: text, msgUnix: unix });
 }
 
-async function correctMeal(env: Env, mealId: string, text: string, unix: number, run: MealRun) {
-  if (await needGemini(env)) return;
+/** Poprawka posiłku opisem Janka (Telegram i aplikacja). Bez wysyłania wiadomości. */
+export async function applyCorrection(
+  env: Env,
+  mealId: string,
+  text: string,
+  unix: number,
+  run: MealRun,
+): Promise<{ status: "ok"; meal: Meal; slotName: string; extra: string[] } | { status: "missing" } | { status: "unclear" }> {
   const st = coach(env);
   const meal = await st.findMeal(mealId);
-  if (!meal) {
-    await say(env, "Nie widzę już tego posiłku, chyba został usunięty.");
-    return;
-  }
-  await tg(env, "sendChatAction", { chat_id: chatId(env), action: "typing" }).catch(() => {});
+  if (!meal) return { status: "missing" };
   const a = await analyzeMeal(env, {
     note: text,
     previous: { label: meal.label, note: meal.note, items: meal.items },
@@ -372,10 +428,7 @@ async function correctMeal(env: Env, mealId: string, text: string, unix: number,
     slotNames: await slotNamesFor(env, meal.date),
     ...run,
   });
-  if (!a.isFood) {
-    await say(env, "Nie załapałem tej poprawki, niczego nie zmieniłem. Napisz np.: „to było 200 g”, „bez sosu”, „to skyr naturalny”.");
-    return;
-  }
+  if (!a.isFood) return { status: "unclear" };
   const { items, used } = await applyBarcode(a.items, a.barcode);
   const updated: Meal = {
     ...meal,
@@ -390,10 +443,27 @@ async function correctMeal(env: Env, mealId: string, text: string, unix: number,
   };
   await st.saveMeal(updated);
   const cfg = await st.getNutCfg();
-  await announce(env, updated, updated.slot ?? labelForTime(slotsFor(cfg, weekdayOf(updated.date)), updated.time, cfg.remindAfterMin), [
-    "✏️ Poprawiono.",
-    ...(used ? [`🏷 Wartości z bazy Open Food Facts: ${used}`] : []),
-  ]);
+  return {
+    status: "ok",
+    meal: updated,
+    slotName: updated.slot ?? labelForTime(slotsFor(cfg, weekdayOf(updated.date)), updated.time, cfg.remindAfterMin),
+    extra: ["✏️ Poprawiono.", ...(used ? [`🏷 Wartości z bazy Open Food Facts: ${used}`] : [])],
+  };
+}
+
+async function correctMeal(env: Env, mealId: string, text: string, unix: number, run: MealRun) {
+  if (await needGemini(env)) return;
+  if (!(await coach(env).findMeal(mealId))) {
+    await say(env, "Nie widzę już tego posiłku, chyba został usunięty.");
+    return;
+  }
+  await tg(env, "sendChatAction", { chat_id: chatId(env), action: "typing" }).catch(() => {});
+  const r = await applyCorrection(env, mealId, text, unix, run);
+  if (r.status === "missing") return void (await say(env, "Nie widzę już tego posiłku, chyba został usunięty."));
+  if (r.status === "unclear") {
+    return void (await say(env, "Nie załapałem tej poprawki, niczego nie zmieniłem. Napisz np.: „to było 200 g”, „bez sosu”, „to skyr naturalny”."));
+  }
+  await announce(env, r.meal, r.slotName, r.extra);
 }
 
 // ---------------- zadania ponawiane w tle ----------------
@@ -788,7 +858,32 @@ export async function routeDietMessage(env: Env, msg: any, isEdit: boolean, ctx:
   return false;
 }
 
+/** Zapisuje ulubiony posiłek jako zjedzony teraz (Telegram i aplikacja). */
+export async function saveFavoriteMeal(env: Env, index: number): Promise<{ meal: Meal; slotName: string } | null> {
+  const st = coach(env);
+  const fav = (await st.getFavorites())[index];
+  if (!fav) return null;
+  const now = warsaw();
+  const cfg = await st.getNutCfg();
+  const meal: Meal = {
+    id: newMealId(now.date),
+    date: now.date,
+    time: now.time,
+    label: fav.name,
+    source: "favorite",
+    note: "",
+    items: fav.items,
+    totals: sumMacros(fav.items),
+    confidence: overallConfidence(fav.items),
+    question: null,
+    createdAt: new Date().toISOString(),
+  };
+  await st.saveMeal(meal);
+  return { meal, slotName: labelForTime(slotsFor(cfg, now.weekday), now.time, cfg.remindAfterMin) };
+}
+
 // ---------------- przyciski ----------------
+
 
 export async function handleCallback(env: Env, cq: any): Promise<void> {
   const st = coach(env);
@@ -810,26 +905,10 @@ export async function handleCallback(env: Env, cq: any): Promise<void> {
       await st.addFavorite({ name: m.label.slice(0, 40), items: m.items });
       await answer("Dodano do ulubionych ⭐");
     } else if (kind === "f") {
-      const fav = (await st.getFavorites())[Number(act)];
-      if (!fav) return void (await answer("Nie znaleziono"));
+      const r = await saveFavoriteMeal(env, Number(act));
+      if (!r) return void (await answer("Nie znaleziono"));
       await answer("Dodaję…");
-      const now = warsaw();
-      const cfg = await st.getNutCfg();
-      const meal: Meal = {
-        id: newMealId(now.date),
-        date: now.date,
-        time: now.time,
-        label: fav.name,
-        source: "favorite",
-        note: "",
-        items: fav.items,
-        totals: sumMacros(fav.items),
-        confidence: overallConfidence(fav.items),
-        question: null,
-        createdAt: new Date().toISOString(),
-      };
-      await st.saveMeal(meal);
-      await announce(env, meal, labelForTime(slotsFor(cfg, now.weekday), now.time, cfg.remindAfterMin));
+      await announce(env, r.meal, r.slotName);
     } else if (kind === "r") {
       const date = rest[0] ?? "";
       const key = `${date}|${rest[1] ?? ""}`;

@@ -66,6 +66,8 @@ export interface MemoryOps {
 const MAX_CONVERSATION = 80;
 const MAX_IDS = 60;
 const MESSAGE_DEBOUNCE_MS = 20_000;
+const AUTH_MAX_FAILS = 8;
+const AUTH_WINDOW_MS = 15 * 60_000;
 const RETRY_MS = 10 * 60_000;
 
 function empty(): CoachMemory {
@@ -418,6 +420,23 @@ export class CoachState extends DurableObject<Env> {
     seen.push(id);
     await this.ctx.storage.put(key, seen.slice(-60));
     return true;
+  }
+
+  // ---------- logowanie do aplikacji: limit nieudanych prób ----------
+
+  /** Czy logowanie jest teraz dozwolone (po 8 nieudanych próbach blokada na 15 minut). */
+  async authStatus(now = Date.now()): Promise<{ allowed: boolean; retryAfterS: number }> {
+    const a = (await this.ctx.storage.get<{ fails: number; since: number }>("auth")) ?? { fails: 0, since: now };
+    if (a.fails >= AUTH_MAX_FAILS && now - a.since < AUTH_WINDOW_MS) return { allowed: false, retryAfterS: Math.ceil((AUTH_WINDOW_MS - (now - a.since)) / 1000) };
+    return { allowed: true, retryAfterS: 0 };
+  }
+  async authFailed(now = Date.now()) {
+    const a = (await this.ctx.storage.get<{ fails: number; since: number }>("auth")) ?? { fails: 0, since: now };
+    const fresh = now - a.since >= AUTH_WINDOW_MS;
+    await this.ctx.storage.put("auth", fresh ? { fails: 1, since: now } : { fails: a.fails + 1, since: a.since });
+  }
+  async authOk() {
+    await this.ctx.storage.delete("auth");
   }
 
   /** Manual wake-up from the setup page. */

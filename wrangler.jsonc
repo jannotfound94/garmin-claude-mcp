@@ -29,6 +29,11 @@
   "triggers": {
     "crons": ["*/15 * * * *"]
   },
+  // The app (PWA, installable and wrappable as an APK) lives in public/app and is served as static files.
+  // Requests that match a file are answered by Cloudflare directly; everything else reaches the Worker.
+  "assets": {
+    "directory": "./public"
+  },
   // Lets src/index.ts import coach/TRENER.md as text.
   "rules": [
     { "type": "Text", "globs": ["**/*.md"], "fallthrough": true }

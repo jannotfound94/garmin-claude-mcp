@@ -1,0 +1,110 @@
+name: Build APK (Janek Trener)
+
+# Buduje aplikację na Androida (plik .apk) w chmurze GitHuba. Uruchamiasz ręcznie: zakładka Actions → "Build APK" → Run workflow.
+# Gotowy plik pojawia się w zakładce Releases (do pobrania na telefonie) oraz jako artefakt przebiegu.
+# Wymaga zmiennej repozytorium APP_URL (Settings → Secrets and variables → Actions → Variables), np.
+#   https://garmin-claude-mcp.twoja-nazwa.workers.dev/app/
+# Instrukcja: SETUP-APLIKACJA.md.
+
+on:
+  workflow_dispatch:
+    inputs:
+      app_url:
+        description: "Adres aplikacji (https://…/app/). Puste = zmienna repozytorium APP_URL"
+        required: false
+        type: string
+      publish_release:
+        description: "Opublikuj APK w zakładce Releases"
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-apk
+  cancel-in-progress: false
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      APP_URL: ${{ inputs.app_url || vars.APP_URL }}
+    defaults:
+      run:
+        working-directory: android-app
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: android-app/package-lock.json
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - uses: android-actions/setup-android@v3
+
+      # Stały klucz podpisu: bez niego każdy build miałby inny podpis i Android odmawiałby aktualizacji nad zainstalowaną wersją.
+      - name: Restore signing key
+        uses: actions/cache@v4
+        with:
+          path: ~/.android/debug.keystore
+          key: android-debug-keystore-v1
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Write Capacitor config from APP_URL
+        run: node scripts/make-config.mjs
+
+      - name: Add Android platform
+        run: npx cap add android
+
+      - name: Launcher icons
+        run: npx capacitor-assets generate --android --assetPath assets
+
+      - name: Patch manifest (camera for meal photos) and version
+        run: |
+          set -euo pipefail
+          MANIFEST=android/app/src/main/AndroidManifest.xml
+          sed -i 's#<uses-permission android:name="android.permission.INTERNET" />#<uses-permission android:name="android.permission.INTERNET" />\n    <uses-permission android:name="android.permission.CAMERA" />\n    <uses-feature android:name="android.hardware.camera" android:required="false" />#' "$MANIFEST"
+          grep -q 'android.permission.CAMERA' "$MANIFEST" || { echo "Nie udało się dodać uprawnienia aparatu do manifestu"; exit 1; }
+          sed -i "s/versionCode 1/versionCode ${{ github.run_number }}/; s/versionName \"1.0\"/versionName \"1.0.${{ github.run_number }}\"/" android/app/build.gradle
+          grep -q "versionCode ${{ github.run_number }}" android/app/build.gradle || { echo "Nie udało się ustawić wersji"; exit 1; }
+
+      - name: Sync web assets
+        run: npx cap sync android
+
+      - name: Build debug APK
+        working-directory: android-app/android
+        run: ./gradlew assembleDebug --no-daemon --stacktrace
+
+      - name: Name the file
+        run: |
+          set -euo pipefail
+          cp android/app/build/outputs/apk/debug/app-debug.apk "janek-trener-${{ github.run_number }}.apk"
+          ls -la janek-trener-*.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: janek-trener-apk
+          path: android-app/janek-trener-*.apk
+          retention-days: 30
+
+      - name: Publish release
+        if: ${{ inputs.publish_release }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release create "apk-${{ github.run_number }}" "janek-trener-${{ github.run_number }}.apk" \
+            --repo "${{ github.repository }}" \
+            --title "Janek Trener (APK) #${{ github.run_number }}" \
+            --notes "Aplikacja na Androida. Pobierz plik .apk na telefonie i zainstaluj (zezwól przeglądarce na instalację z nieznanych źródeł). Aplikacja ładuje interfejs z Twojego serwera, więc zmiany w wyglądzie nie wymagają nowego APK."
