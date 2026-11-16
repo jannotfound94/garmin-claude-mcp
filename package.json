@@ -10,7 +10,7 @@
     "start": "wrangler dev",
     "cf-typegen": "wrangler types",
     "type-check": "tsc --noEmit",
-    "test": "esbuild test/diet.test.ts test/integration.test.ts --bundle --platform=node --format=esm --alias:cloudflare:workers=./test/cloudflare-workers-shim.mjs --out-extension:.js=.mjs --outdir=.test-out --log-level=warning && node --test .test-out/diet.test.mjs .test-out/integration.test.mjs && npm run check:app",
+    "test": "esbuild test/diet.test.ts test/integration.test.ts test/routes.test.ts --bundle --platform=node --format=esm --alias:cloudflare:workers=./test/cloudflare-workers-shim.mjs --out-extension:.js=.mjs --outdir=.test-out --log-level=warning && node --test .test-out/diet.test.mjs .test-out/integration.test.mjs .test-out/routes.test.mjs && npm run check:app",
     "check:app": "node scripts/check-app.mjs"
   },
   "dependencies": {

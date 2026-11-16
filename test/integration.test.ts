@@ -7,6 +7,7 @@ import { handleApi, issueToken, verifyToken } from "../src/api";
 import { deliver, notifyCoach, reminderToken, verifyReminderToken } from "../src/notify";
 import { encryptPayload, vapidJwt } from "../src/push";
 import { b64urlDecode, b64urlEncode } from "../src/crypto";
+import { satisfiedSlots } from "../src/nutrition";
 
 // ---- in-memory Durable Object storage ----
 const store = new Map<string, any>();
@@ -927,4 +928,47 @@ test("API location: zapis pozycji, walidacja, usunięcie", async () => {
   assert.equal((await api("/api/location", { method: "POST", body: { lat: 54.352, lon: 18.646 } })).status, 201);
   assert.ok(JSON.stringify([...store.entries()]).includes("54.352"));
   assert.equal((await api("/api/location", { method: "DELETE" })).status, 200);
+});
+
+test("rodzaj posiłku z aplikacji: obiad zaliczają okno z planu, deser i przekąska nie zastępują posiłku z planu", async () => {
+  mock.timers.reset(); mock.timers.enable({ apis: ["Date"], now: new Date("2026-12-14T09:30:00Z") }); // pn 10:30
+  TOKEN = await issueToken(env);
+  store.delete("nut:meals:2026-12-14"); geminiQueue.length = 0;
+  await state.patchNutCfg({ slots: [{ name: "śniadanie", time: "07:30" }, { name: "obiad", time: "13:30" }, { name: "kolacja", time: "19:30" }], weekendSlots: [], remindAfterMin: 180 });
+  const food = (label: string) => ({ is_food: true, meal_label: label, items: [{ name: label, grams: 100, kcal: 200, protein_g: 5, carbs_g: 30, fat_g: 5, confidence: "medium", basis: "estimate" }] });
+
+  assert.equal((await api("/api/meals", { method: "POST", body: { text: "zupa", kind: "zupa" } })).status, 400);
+
+  geminiQueue.push(food("Zupa pomidorowa"));
+  const lunch = await api("/api/meals", { method: "POST", body: { text: "zupa pomidorowa", time: "10:00", kind: "obiad" } });
+  assert.equal(lunch.status, 201);
+  assert.equal(lunch.body.meal.kind, "obiad");
+  assert.equal(lunch.body.meal.slot, "obiad", "zalicza okno obiadu z planu mimo godziny 10:00");
+  assert.equal(lunch.body.slotName, "obiad");
+
+  geminiQueue.push(food("Lody"));
+  const dessert = await api("/api/meals", { method: "POST", body: { text: "lody", time: "10:15", kind: "deser" } });
+  assert.equal(dessert.status, 201);
+  assert.equal(dessert.body.meal.kind, "deser");
+  assert.equal(dessert.body.meal.slot, undefined);
+  assert.equal(dessert.body.slotName, "Deser");
+  assert.deepEqual(dessert.body.overview.meals.map((m: any) => m.kind), ["obiad", "deser"]);
+
+  geminiQueue.push(food("Orzechy"));
+  const snack = await api("/api/meals", { method: "POST", body: { text: "orzechy", time: "10:20", kind: "przekaska" } });
+  assert.equal(snack.body.slotName, "Przekąska");
+
+  // bez wyboru działa jak dotąd (okno z godziny)
+  geminiQueue.push(food("Kanapka"));
+  const auto = await api("/api/meals", { method: "POST", body: { text: "kanapka", time: "10:25" } });
+  assert.equal(auto.body.meal.kind, undefined);
+  assert.equal(auto.body.slotName, "śniadanie");
+
+  // przypomnienia: deser o 10:00 nie zaliczy śniadania z planu, kanapka bez rodzaju tak
+  const slots = [{ name: "śniadanie", time: "07:30" }, { name: "obiad", time: "13:30" }];
+  assert.equal(satisfiedSlots(slots, [{ time: "10:00", slot: null, kind: "deser" }], 180).size, 0);
+  assert.equal(satisfiedSlots(slots, [{ time: "10:00", slot: null, kind: "przekaska" }], 180).size, 0);
+  assert.equal(satisfiedSlots(slots, [{ time: "10:00", slot: null, kind: null }], 180).size, 1);
+  assert.equal(satisfiedSlots(slots, [{ time: "10:00", slot: "obiad", kind: "obiad" }], 180).has(1), true);
+  mock.timers.reset();
 });

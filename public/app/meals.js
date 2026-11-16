@@ -1,7 +1,7 @@
 // Posiłki: karta kalorii z pierścieniem, dodawanie (opis i/lub zdjęcie), poprawki, karta posiłku.
 import { ApiError, api } from "./api.js";
 import { ring } from "./charts.js";
-import { SLOT_ICON, bar, badge, card, chip, dateObj, errMsg, fmtDay, h, icon, invalidateSummary, n0, nowHm, openSheet, sleep, todayLocal, toast } from "./ui.js";
+import { KIND_LABEL, MEAL_KINDS, SLOT_ICON, bar, badge, card, chip, dateObj, errMsg, fmtDay, h, icon, invalidateSummary, n0, nowHm, openSheet, sleep, todayLocal, toast } from "./ui.js";
 
 const confTone = { high: "good", medium: "warn", low: "bad" };
 const confLabel = { high: "pewność: wysoka", medium: "pewność: średnia", low: "pewność: niska" };
@@ -70,6 +70,19 @@ const statusRow = (m, spin = true) => h("div", { class: "status" }, spin ? h("di
 export function openAddMeal({ date = todayLocal(), onSaved } = {}) {
   openSheet((close) => {
     let image = null;
+    let kind = null; // rodzaj posiłku; brak = serwer rozpozna z opisu i godziny
+    const kinds = h("div", { class: "kinds", role: "group", "aria-label": "Rodzaj posiłku" }, MEAL_KINDS.map((k) => {
+      const b = h("button", { type: "button", class: "kind", "aria-pressed": "false" }, icon(k.icon, 22), h("span", {}, k.label));
+      b.addEventListener("click", () => {
+        kind = kind === k.id ? null : k.id;
+        [...kinds.children].forEach((c, i) => {
+          const on = MEAL_KINDS[i].id === kind;
+          c.classList.toggle("on", on);
+          c.setAttribute("aria-pressed", String(on));
+        });
+      });
+      return b;
+    }));
     const text = h("textarea", { placeholder: "np. szakszuka z 2 jajek na łyżce masła + 2 kromki chleba proteinowego Grzybki", "aria-label": "Opis posiłku" });
     const time = h("input", { type: "time", value: date === todayLocal() ? nowHm() : "12:00", "aria-label": "Godzina" });
     const preview = h("div", {});
@@ -97,7 +110,7 @@ export function openAddMeal({ date = todayLocal(), onSaved } = {}) {
       const setStatus = (m) => status.replaceChildren(statusRow(m));
       setStatus(image ? "Analizuję zdjęcie…" : "Liczę kalorie…");
       try {
-        const body = { text: text.value.trim(), ...(image ? { image: { mime: image.mime, data: image.data } } : {}), ...(date !== todayLocal() ? { date } : {}), time: time.value };
+        const body = { text: text.value.trim(), ...(image ? { image: { mime: image.mime, data: image.data } } : {}), ...(date !== todayLocal() ? { date } : {}), ...(kind ? { kind } : {}), time: time.value };
         const r = await postWithRetry("/meals", body, setStatus);
         invalidateSummary();
         toast(`Zapisano: ${r.meal.label} (${n0(r.meal.totals.kcal)} kcal)`);
@@ -112,6 +125,8 @@ export function openAddMeal({ date = todayLocal(), onSaved } = {}) {
       "div",
       { class: "form" },
       h("h3", {}, date === todayLocal() ? "Dodaj posiłek" : `Dodaj posiłek (${fmtDay(date)})`),
+      kinds,
+      h("div", { class: "small muted", style: { marginTop: "-6px" } }, "Rodzaj posiłku (bez wyboru rozpoznam go sam z godziny i opisu)"),
       text,
       preview,
       h("div", { class: "row wrap" }, h("button", { class: "btn ghost small", onclick: () => pick(true) }, icon("camera", 16), "Zdjęcie"), h("button", { class: "btn ghost small", onclick: () => pick(false) }, icon("image", 16), "Galeria"), h("div", { class: "grow" }), h("label", { class: "field", style: { width: "112px" } }, "Godzina", time)),
@@ -153,7 +168,7 @@ export function mealCard(m, reload) {
   return h(
     "div",
     { class: "card meal" },
-    h("div", { class: "head" }, badge(SLOT_ICON(m.slot, m.time), "blue"), h("div", { class: "grow" }, h("span", { class: "time" }, m.time), m.slot ? h("span", { class: "muted small", style: { marginLeft: "8px" } }, m.slot) : null), h("span", { class: "kc" }, `${n0(m.totals.kcal)} kcal`)),
+    h("div", { class: "head" }, badge(SLOT_ICON(m.slot, m.time, m.kind), "blue"), h("div", { class: "grow" }, h("span", { class: "time" }, m.time), m.kind || m.slot ? h("span", { class: "muted small", style: { marginLeft: "8px" } }, KIND_LABEL[m.kind] || m.slot) : null), h("span", { class: "kc" }, `${n0(m.totals.kcal)} kcal`)),
     h("div", {}, m.label),
     h("div", { class: "row wrap small muted" }, h("span", {}, `B ${n0(m.totals.protein)} · W ${n0(m.totals.carbs)} · T ${n0(m.totals.fat)} g`), chip(confLabel[m.confidence] || "", confTone[m.confidence] || ""), m.source === "photo" ? chip("zdjęcie", "", "camera") : null),
     m.question ? h("div", { class: "q" }, `❓ ${m.question} (stuknij „Popraw” i odpowiedz)`) : null,

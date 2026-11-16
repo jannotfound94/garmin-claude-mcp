@@ -31,6 +31,8 @@ export interface RouteOption {
   paths_pct: number; // paths, tracks, footways
   green_avg: number; // 0-10, 10 = greenest (converted: ORS reports its green index inverted, see greenness())
   retrace_pct: number; // share of the loop run twice (out-and-back parts); 0 = clean loop
+  compact?: number; // 0-1, how "round" the loop is (4*pi*area/length^2); thin out-and-back shapes are near 0
+  trimmed_m?: number; // metres of needless spurs and small loops cut out of the routed path (see tidyRoute)
   source: "parki" | "ors"; // through parks/unpaved paths (own generator) or an OpenRouteService round trip
   via?: string[]; // names of the parks the loop goes through
   coords: [number, number][]; // [lon, lat]
@@ -91,7 +93,7 @@ async function loop(apiKey: string, start: LatLon, meters: number, seed: number)
       instructions: false,
       extra_info: ["surface", "waytype", "green"],
       options: {
-        round_trip: { length: meters, points: 6, seed },
+        round_trip: { length: meters, points: 4, seed },
         avoid_features: ["steps"],
         profile_params: { weightings: { green: 1, quiet: 1 } },
       },
@@ -108,18 +110,132 @@ async function parseRoute(res: Response): Promise<Measured> {
   const f = j.features?.[0];
   if (!f) throw new Error("OpenRouteService: brak trasy");
   const ex = f.properties?.extras ?? {};
+  const tidy = tidyRoute(f.geometry.coordinates as [number, number][]);
   const unpaved = summaryPct(ex.surface?.summary, (v) => UNPAVED.has(v));
   const paved = summaryPct(ex.surface?.summary, (v) => PAVED.has(v));
   return {
-    distance_km: Math.round((f.properties?.summary?.distance ?? 0) / 100) / 10,
+    // After trimming, the length comes from the geometry; untouched routes keep the router's own figure.
+    distance_km: Math.round((tidy.trimmedM > 0 ? tidy.lengthM : (f.properties?.summary?.distance ?? tidy.lengthM)) / 100) / 10,
     unpaved_pct: Math.round(unpaved),
     paved_pct: Math.round(paved),
     unknown_surface_pct: Math.max(0, Math.round(100 - unpaved - paved)),
     paths_pct: Math.round(summaryPct(ex.waytype?.summary, (v) => PATHS.has(v))),
-    retrace_pct: retracePct(f.geometry.coordinates),
+    retrace_pct: retracePct(tidy.coords),
+    compact: Math.round(compactness(tidy.coords) * 100) / 100,
+    ...(tidy.trimmedM > 0 ? { trimmed_m: Math.round(tidy.trimmedM) } : {}),
     green_avg: Math.round(greenness(ex.green?.summary) * 10) / 10,
-    coords: f.geometry.coordinates as [number, number][],
+    coords: tidy.coords,
   };
+}
+
+// ---------------- sprzątanie geometrii: zbędne odnogi i pętelki ----------------
+
+function plane(lat0: number) {
+  const kx = 111320 * Math.cos((lat0 * Math.PI) / 180);
+  return (lon: number, lat: number): [number, number] => [lon * kx, lat * 110540];
+}
+
+interface Pt {
+  lon: number;
+  lat: number;
+  x: number;
+  y: number;
+  d: number; // distance along the route, m
+  orig: boolean; // a vertex returned by the router (interpolated samples are dropped from the output)
+  keep?: boolean; // end of a cut: always emitted
+}
+
+/** The route as points at most `step` m apart (original vertices included), with distance along the route. */
+function samplePoints(coords: number[][], step = 10): Pt[] {
+  const xy = plane(coords[0][1]);
+  const out: Pt[] = [];
+  let dist = 0;
+  const push = (lon: number, lat: number, d: number, orig: boolean) => {
+    const [x, y] = xy(lon, lat);
+    out.push({ lon, lat, x, y, d, orig });
+  };
+  push(coords[0][0], coords[0][1], 0, true);
+  for (let i = 1; i < coords.length; i++) {
+    const [x0, y0] = xy(coords[i - 1][0], coords[i - 1][1]);
+    const [x1, y1] = xy(coords[i][0], coords[i][1]);
+    const seg = Math.hypot(x1 - x0, y1 - y0);
+    for (let t = step; t < seg; t += step) {
+      const f = t / seg;
+      push(coords[i - 1][0] + (coords[i][0] - coords[i - 1][0]) * f, coords[i - 1][1] + (coords[i][1] - coords[i - 1][1]) * f, dist + t, false);
+    }
+    dist += seg;
+    push(coords[i][0], coords[i][1], dist, true);
+  }
+  return out;
+}
+
+export const routeLengthM = (coords: number[][]) => (coords.length ? (() => { const p = samplePoints(coords, 1e9); return p[p.length - 1].d; })() : 0);
+
+/**
+ * Routers love detours: a short stub into a courtyard and back, or a lap around a building block, because the
+ * via point snapped to a spot off the street. Both leave the route passing the same place twice within a few
+ * hundred metres. For every point we look for a later point within 15 m of it that is 40-600 m further along;
+ * everything in between is cut out (the longest such excursion first). Two passes near the same spot far apart
+ * along the route (e.g. leaving and returning home) are untouched. If more than 25% of the route would go, the
+ * route is returned as it was: that is not a detour but a different kind of route.
+ */
+export function tidyRoute(coords: [number, number][]): { coords: [number, number][]; trimmedM: number; lengthM: number } {
+  if (coords.length < 4) return { coords, trimmedM: 0, lengthM: routeLengthM(coords) };
+  let pts = samplePoints(coords);
+  const total = pts[pts.length - 1].d;
+  const CELL = 15;
+  const NEAR = 15;
+  let trimmed = 0;
+  for (let guard = 0; guard < 40; guard++) {
+    const grid = new Map<string, number[]>();
+    pts.forEach((p, i) => {
+      const k = `${Math.floor(p.x / CELL)},${Math.floor(p.y / CELL)}`;
+      (grid.get(k) ?? grid.set(k, []).get(k)!).push(i);
+    });
+    let cut: [number, number] | null = null;
+    for (let i = 0; i < pts.length && !cut; i++) {
+      const cx = Math.floor(pts[i].x / CELL);
+      const cy = Math.floor(pts[i].y / CELL);
+      let bestJ = -1;
+      for (let dx = -1; dx <= 1; dx++)
+        for (let dy = -1; dy <= 1; dy++)
+          for (const j of grid.get(`${cx + dx},${cy + dy}`) ?? []) {
+            const gap = pts[j].d - pts[i].d;
+            if (j > i && gap >= 40 && gap <= 600 && j > bestJ && Math.hypot(pts[j].x - pts[i].x, pts[j].y - pts[i].y) < NEAR) bestJ = j;
+          }
+      if (bestJ > 0) cut = [i, bestJ];
+    }
+    if (!cut) break;
+    const [i, j] = cut;
+    trimmed += pts[j].d - pts[i].d;
+    if (trimmed > 0.25 * total) return { coords, trimmedM: 0, lengthM: total };
+    pts[i].keep = pts[j].keep = true;
+    pts = [...pts.slice(0, i + 1), ...pts.slice(j)];
+    // distances after the cut: the jump i -> j is at most NEAR metres
+    let d = 0;
+    pts.forEach((p, k) => {
+      if (k) d += Math.hypot(p.x - pts[k - 1].x, p.y - pts[k - 1].y);
+      p.d = d;
+    });
+  }
+  const out = pts.filter((p) => p.orig || p.keep).map((p): [number, number] => [p.lon, p.lat]);
+  return { coords: trimmed > 0 ? out : coords, trimmedM: trimmed, lengthM: trimmed > 0 ? pts[pts.length - 1].d : total };
+}
+
+/** 4*pi*area/length^2 of the closed route: 1 = circle, ~0.6 = 3:1 rectangle, ~0 = out-and-back or figure-eight. */
+export function compactness(coords: number[][]): number {
+  if (coords.length < 3) return 0;
+  const xy = plane(coords[0][1]);
+  const p = coords.map(([lon, lat]) => xy(lon, lat));
+  let area = 0;
+  let len = 0;
+  for (let i = 0; i < p.length; i++) {
+    const [x0, y0] = p[i];
+    const [x1, y1] = p[(i + 1) % p.length];
+    area += x0 * y1 - x1 * y0;
+    len += Math.hypot(x1 - x0, y1 - y0);
+  }
+  return len > 0 ? Math.min(1, (4 * Math.PI * Math.abs(area / 2)) / (len * len)) : 0;
 }
 
 /** A loop start -> anchors -> start, routed on foot-hiking with the same measurements. */
@@ -133,7 +249,7 @@ async function viaRoute(apiKey: string, start: LatLon, pts: Anchor[]) {
       coordinates: coords,
       instructions: false,
       extra_info: ["surface", "waytype", "green"],
-      radiuses: coords.map((_, i) => (i === 0 || i === coords.length - 1 ? 350 : 700)),
+      radiuses: coords.map((_, i) => (i === 0 || i === coords.length - 1 ? 350 : 500)),
       options: { avoid_features: ["steps"], profile_params: { weightings: { green: 1, quiet: 1 } } },
     }),
   });
@@ -143,7 +259,13 @@ async function viaRoute(apiKey: string, start: LatLon, pts: Anchor[]) {
 /** Score: soft surface first, then greenery, then paths; unknown surface on paths counts half. */
 function score(o: Omit<RouteOption, "label">) {
   return (
-    o.unpaved_pct + 0.5 * Math.min(o.unknown_surface_pct, o.paths_pct) + 3 * o.green_avg + 0.2 * o.paths_pct - 1.5 * o.retrace_pct
+    o.unpaved_pct +
+    0.5 * Math.min(o.unknown_surface_pct, o.paths_pct) +
+    3 * o.green_avg +
+    0.2 * o.paths_pct -
+    1.5 * o.retrace_pct +
+    60 * (o.compact ?? 0.3) - // a round, simple shape beats a tangle of detours (the most visible quality)
+    0.05 * (o.trimmed_m ?? 0)
   );
 }
 
@@ -251,7 +373,8 @@ export async function proposeLoops(apiKey: string, start: LatLon, targetKm: numb
   const pool: Cand[] = [];
   let firstError: unknown;
   const off = (o: { distance_km: number }) => Math.abs(o.distance_km - targetKm) / targetKm;
-  const good = () => pool.filter((o) => off(o) <= 0.1 && o.retrace_pct <= 25);
+  const tidy = (o: { retrace_pct: number; compact?: number }) => o.retrace_pct <= 25 && (o.compact ?? 1) >= 0.15;
+  const good = () => pool.filter((o) => off(o) <= 0.1 && tidy(o));
 
   if (anchors.length >= 3) {
     const rand = mulberry32(Math.floor(Math.random() * 2 ** 31));
@@ -283,7 +406,7 @@ export async function proposeLoops(apiKey: string, start: LatLon, targetKm: numb
   if (!pool.length) throw new Error(String(firstError ?? "Nie udało się wyznaczyć tras"));
 
   // Prefer real loops within 10% of the target, best score first; otherwise the closest by length.
-  const loopsOnly = pool.filter((o) => o.retrace_pct <= 25);
+  const loopsOnly = pool.filter(tidy);
   const candidates = loopsOnly.length >= 2 ? loopsOnly : pool;
   const near = candidates.filter((o) => off(o) <= 0.1);
   const ranked = near.length >= 2 ? near.sort((a, b) => score(b) - score(a)) : [...candidates].sort((a, b) => off(a) - off(b));
@@ -303,15 +426,16 @@ export function toGpx(name: string, coords: number[][]): string {
 </gpx>`;
 }
 
-export function mapPage(title: string, coords: number[][], gpxUrl: string): string {
+export function mapPage(title: string, coords: number[][], gpxUrl: string, details = ""): string {
   const latlngs = JSON.stringify(coords.map(([lon, lat]) => [lat, lon]));
   return `<!doctype html><html lang="pl"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>${title}</title>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
-<style>html,body{margin:0;height:100%;font-family:system-ui;background:#fff}#map{position:absolute;top:56px;bottom:0;left:0;right:0}
-header{height:56px;display:flex;align-items:center;justify-content:space-between;padding:0 16px;box-sizing:border-box;border-bottom:1px solid #ddd}
-a.btn{background:#1a73e8;color:#fff;padding:8px 12px;border-radius:6px;text-decoration:none}</style></head>
-<body><header><a class="btn back" href="/app/#/plan" onclick="if(history.length>1){history.back();return false}">← Wróć</a><b>${title}</b><a class="btn" href="${gpxUrl}">GPX</a></header><div id="map"></div>
+<style>html,body{margin:0;height:100%;font-family:system-ui;background:#fff}#map{position:absolute;top:64px;bottom:0;left:0;right:0}
+header{height:64px;display:flex;align-items:center;gap:10px;padding:0 12px;box-sizing:border-box;border-bottom:1px solid #ddd}
+header .t{flex:1;min-width:0}header b{display:block;font-size:16px}header small{display:block;color:#555;font-size:12px;line-height:1.25;max-height:2.5em;overflow:hidden}
+a.btn{background:#1a73e8;color:#fff;padding:8px 12px;border-radius:6px;text-decoration:none;white-space:nowrap;font-size:14px}a.back{background:#eef2f7;color:#1a2433}</style></head>
+<body><header><a class="btn back" href="/app/#/plan" onclick="if(history.length>1){history.back();return false}">← Wróć</a><div class="t"><b>${title}</b>${details ? `<small>${details}</small>` : ""}</div><a class="btn" href="${gpxUrl}">Otwórz GPX</a></header><div id="map"></div>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
 <script>const p=${latlngs};const m=L.map('map');L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'&copy; OpenStreetMap'}).addTo(m);
 const l=L.polyline(p,{color:'#d32f2f',weight:5}).addTo(m);L.circleMarker(p[0],{radius:7,color:'#1a73e8'}).addTo(m).bindPopup('Start / meta');m.fitBounds(l.getBounds(),{padding:[20,20]});</script>

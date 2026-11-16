@@ -18,6 +18,12 @@ export interface FoodItem extends Macros {
   confidence: Confidence;
   basis: "label" | "estimate"; // label: z etykiety / bazy produktu; estimate: oszacowanie ze zdjęcia
 }
+/** Rodzaj posiłku wybrany w aplikacji. Przekąska i deser to dodatki poza planem: nie zaliczają żadnego okna z planu. */
+export type MealKind = "sniadanie" | "przekaska" | "obiad" | "kolacja" | "deser";
+export const MEAL_KINDS: Record<MealKind, string> = { sniadanie: "Śniadanie", przekaska: "Przekąska", obiad: "Obiad", kolacja: "Kolacja", deser: "Deser" };
+export const isMealKind = (v: unknown): v is MealKind => typeof v === "string" && Object.prototype.hasOwnProperty.call(MEAL_KINDS, v);
+const EXTRA_KINDS = new Set<string>(["przekaska", "deser"]);
+
 export interface Meal {
   id: string; // "YYYYMMDD.abc123": data jest zaszyta w id
   date: string; // YYYY-MM-DD (czas warszawski)
@@ -31,6 +37,8 @@ export interface Meal {
   question: string | null;
   /** Nazwa okna z planu posiłków, jeśli Jan wyraźnie napisał, który to posiłek ("to było śniadanie"). */
   slot?: string | null;
+  /** Rodzaj wskazany przez Jana w aplikacji (patrz MealKind). */
+  kind?: MealKind | null;
   photoFileId?: string;
   createdAt: string; // ISO UTC
 }
@@ -246,10 +254,11 @@ export interface DueReminder {
  * Które okna posiłków mają zapisany posiłek. Posiłek z jawnie podanym oknem ("to było śniadanie") zalicza właśnie je,
  * bez względu na godzinę wpisu. Pozostałe zaliczają najbliższe okno czasowe (każdy posiłek najwyżej jedno).
  */
-export function satisfiedSlots(slots: Slot[], meals: Pick<Meal, "time" | "slot">[], remindAfterMin: number): Set<number> {
+export function satisfiedSlots(slots: Slot[], meals: Pick<Meal, "time" | "slot" | "kind">[], remindAfterMin: number): Set<number> {
   const used = new Set<number>();
-  const byTime: Pick<Meal, "time" | "slot">[] = [];
+  const byTime: Pick<Meal, "time" | "slot" | "kind">[] = [];
   for (const m of meals) {
+    if (m.kind && EXTRA_KINDS.has(m.kind)) continue; // przekąska i deser nie zastępują posiłku z planu
     const i = m.slot ? slots.findIndex((s, idx) => !used.has(idx) && slotKey(s.name) === slotKey(m.slot!)) : -1;
     if (i >= 0) used.add(i);
     else byTime.push(m);
@@ -283,7 +292,7 @@ export function evaluateReminders(args: {
   date: string;
   nowMin: number;
   weekday: string;
-  meals: Pick<Meal, "time" | "slot">[];
+  meals: Pick<Meal, "time" | "slot" | "kind">[];
   state: Record<string, string>;
   nowIso: string;
 }): { due: DueReminder[]; markOk: string[] } {

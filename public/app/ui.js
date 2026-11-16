@@ -168,8 +168,22 @@ export function workoutLine(p) {
   return h("div", { class: "line" }, icon("run", 18), h("div", { class: "grow" }, h("strong", {}, p.name)), h("span", { class: "muted small" }, [p.km ? `${n1(p.km)} km` : null, p.minutes ? `${p.minutes} min` : null].filter(Boolean).join(" · ")));
 }
 
-export const SLOT_ICON = (slot, time) => {
+export const MEAL_KINDS = [
+  { id: "sniadanie", label: "Śniadanie", icon: "sunrise" },
+  { id: "przekaska", label: "Przekąska", icon: "apple" },
+  { id: "obiad", label: "Obiad", icon: "plate" },
+  { id: "kolacja", label: "Kolacja", icon: "moon" },
+  { id: "deser", label: "Deser", icon: "dessert" },
+];
+export const KIND_LABEL = Object.fromEntries(MEAL_KINDS.map((k) => [k.id, k.label]));
+
+export const SLOT_ICON = (slot, time, kind) => {
+  if (kind) {
+    const k = MEAL_KINDS.find((x) => x.id === kind);
+    if (k) return k.icon;
+  }
   const s = String(slot || "").toLowerCase();
+  if (/deser|słodk|slodk/.test(s)) return "dessert";
   if (/śniad|sniad/.test(s) && !/drugie/.test(s)) return "sunrise";
   if (/kolac/.test(s)) return "moon";
   if (/obiad|lunch/.test(s)) return "plate";

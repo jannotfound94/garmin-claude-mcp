@@ -65,7 +65,7 @@ Jeśli powiadomienia nie przychodzą: sprawdź zgodę (ikona kłódki przy adres
 
 ### Wersja APK: lokalizacja i przycisk „wstecz”
 
-APK od wersji z tą poprawką prosi o zgodę na lokalizację (przy pierwszym „Użyj mojej lokalizacji”). Jeśli wcześniej odmówiłeś, włącz ją w Ustawienia telefonu → Aplikacje → Garda → Uprawnienia → Lokalizacja. Przycisk „wstecz” cofa po ekranach aplikacji i mapie trasy, a na ekranie startowym chowa aplikację. Pobrany plik GPX otwiera się w przeglądarce telefonu. Nowe APK instaluje się nad starym (ten sam podpis), bez odinstalowywania.
+APK od wersji z tą poprawką prosi o zgodę na lokalizację (przy pierwszym „Użyj mojej lokalizacji”). Jeśli wcześniej odmówiłeś, włącz ją w Ustawienia telefonu → Aplikacje → Garda → Uprawnienia → Lokalizacja. Przycisk „wstecz” cofa po ekranach aplikacji i mapie trasy, a na ekranie startowym chowa aplikację. „Otwórz GPX w aplikacji” nie pobiera pliku do katalogu Pobrane, tylko od razu pokazuje listę aplikacji, w których można go otworzyć (np. Locus, OsmAnd; Garmin Connect, jeśli zgłasza się do plików GPX na Twoim telefonie). Jeśli Garmin Connect nie ma na liście, kurs dodasz w Garmin Connect w przeglądarce (Szkolenia → Kursy → Importuj). Nowe APK instaluje się nad starym (ten sam podpis), bez odinstalowywania.
 
 ## Jak korzystać
 
