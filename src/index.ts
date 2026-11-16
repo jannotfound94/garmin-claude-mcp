@@ -6,7 +6,8 @@ import TRENER from "../coach/TRENER.md";
 import { Icu, compactActivity, compactEvent, compactIntervals, compactWellness, computeSplits } from "./icu";
 import { GarminPersonal, capJson } from "./garmin";
 import { runScheduler } from "./scheduler";
-import { coach, handleTelegramWebhook, sendTelegram, tg, webhookSecret } from "./telegram";
+import { geocode, mapPage, proposeLoops, toGpx } from "./routes";
+import { coach, handleTelegramWebhook, sendTelegram, sendTelegramFile, tg, webhookSecret } from "./telegram";
 import { addDays, daysBetween, fmtWarsaw, warsaw, warsawToUtc } from "./time";
 
 export { CoachState } from "./state";
@@ -176,6 +177,72 @@ export class MyMCP extends McpAgent<Env> {
       },
     );
 
+    // ---------------- running routes ----------------
+
+    this.server.tool(
+      "proposeRoutes",
+      "Generate two running loops (A and B) of the given length from Jan's start point (shared Telegram location from the last 3 h, otherwise home), preferring unpaved paths, parks and greenery. Returns stats and links to a map with a GPX download. Send Jan both options and ask him to choose.",
+      { distanceKm: z.number().min(2).max(42).describe("Total distance of today's run, km") },
+      async ({ distanceKm }) => {
+        if (!this.env.ORS_API_KEY) return text("Trasy niedostępne: brak sekretu ORS_API_KEY.");
+        const state = coach(this.env);
+        const { home, last, origin } = await state.getRouteSettings();
+        const recent = last && Date.now() - Date.parse(last.at) < 3 * 3600_000 ? last : null;
+        const start = recent ?? home;
+        if (!start) return text("Trasy niedostępne: brak punktu startu (ustaw adres domowy na stronie /setup albo poproś Jana o udostępnienie lokalizacji).");
+        const options = await proposeLoops(this.env.ORS_API_KEY, start, distanceKm);
+        const id = crypto.randomUUID().replace(/-/g, "").slice(0, 16);
+        await state.saveProposal({
+          id,
+          created: new Date().toISOString(),
+          target_km: distanceKm,
+          start,
+          start_label: recent ? "udostępniona lokalizacja" : "dom",
+          options,
+        });
+        const base = origin ?? "";
+        return text({
+          proposalId: id,
+          start: recent ? "udostępniona lokalizacja Jana" : "dom",
+          opcje: options.map((o) => ({
+            trasa: o.label,
+            dystans_km: o.distance_km,
+            nawierzchnia_nieutwardzona_proc: o.unpaved_pct,
+            nawierzchnia_utwardzona_proc: o.paved_pct,
+            nawierzchnia_nieznana_proc: o.unknown_surface_pct,
+            sciezki_i_alejki_proc: o.paths_pct,
+            zielen_0_10: o.green_avg,
+            mapa: `${base}/trasa/${id}/${o.label}`,
+          })),
+          uwaga: "Dane o nawierzchni pochodzą z OpenStreetMap i bywają niepełne (stąd „nieznana”).",
+        });
+      },
+    );
+
+    this.server.tool(
+      "chooseRoute",
+      "After Jan picks A or B: sends him the GPX file of the chosen loop on Telegram (to open in Locus Map or import as a Garmin course) and returns its distance, so you can update today's workout steps to match it.",
+      { proposalId: z.string(), option: z.string().describe("A or B") },
+      async ({ proposalId, option }) => {
+        const state = coach(this.env);
+        const p = await state.getProposal(proposalId);
+        if (!p) return text("Nie znaleziono propozycji tras (mogła wygasnąć). Wygeneruj nowe przez proposeRoutes.");
+        const o = p.options.find((x) => x.label.toUpperCase() === option.trim().toUpperCase());
+        if (!o) return text(`Brak trasy ${option}. Dostępne: ${p.options.map((x) => x.label).join(", ")}`);
+        const date = warsaw().date;
+        const name = `Trasa ${o.label} ${o.distance_km} km (${date})`;
+        await sendTelegramFile(
+          this.env,
+          `trasa-${date}-${o.label}.gpx`,
+          toGpx(name, o.coords),
+          `${name}. Stuknij plik i otwórz w Locus Map, albo zaimportuj jako kurs w Garmin Connect.`,
+        );
+        await state.markChosen(proposalId, o.label);
+        const { origin } = await state.getRouteSettings();
+        return text({ wyslano_gpx: true, trasa: o.label, dystans_km: o.distance_km, mapa: `${origin ?? ""}/trasa/${proposalId}/${o.label}` });
+      },
+    );
+
     // ---------------- coach agent ----------------
 
     this.server.tool(
@@ -227,6 +294,19 @@ export class MyMCP extends McpAgent<Env> {
             garmin_regeneracja_7_dni: val(garminToday, (x) => x),
           },
           telegram_skonfigurowany: Boolean(this.env.TELEGRAM_BOT_TOKEN && this.env.TELEGRAM_CHAT_ID),
+          trasy: await (async () => {
+            const { home, last } = await coach(this.env).getRouteSettings();
+            const props = await coach(this.env).listProposals();
+            const latest = props[props.length - 1];
+            return {
+              dostepne: Boolean(this.env.ORS_API_KEY && (home || last)),
+              start_dom_ustawiony: Boolean(home),
+              udostepniona_lokalizacja: last ? fmtWarsaw(last.at) : null,
+              ostatnia_propozycja: latest
+                ? { proposalId: latest.id, kiedy: fmtWarsaw(latest.created), dystans_km: latest.target_km, wybrana: latest.chosen ?? null }
+                : null,
+            };
+          })(),
         });
       },
     );
@@ -343,7 +423,17 @@ async function garminSection(env: Env, password: string) {
     ? `<p>✅ Osobisty klucz API Garmina jest wpisany (GARMIN_PERSONAL_API_KEY).</p>
     <form method="post">${hidden}${btn("garmin_test", "Sprawdź dane z Garmin Connect")}</form>`
     : `<p>❌ Brak klucza. Utwórz „Osobisty klucz API” w Garmin Connect (przeglądarka) i wpisz go w Cloudflare jako sekret <code>GARMIN_PERSONAL_API_KEY</code>.</p>`;
-  return `<h3>Garmin Connect</h3>${body}`;
+  return `<h3>Garmin Connect</h3>${body}${await routesSection(env, password)}`;
+}
+
+async function routesSection(env: Env, password: string) {
+  const hidden = `<input type="hidden" name="password" value="${esc(password)}">`;
+  const { home } = await coach(env).getRouteSettings();
+  return `<h3>Trasy</h3>
+  <ul><li>${env.ORS_API_KEY ? "✅" : "❌"} ORS_API_KEY (darmowy klucz z openrouteservice.org)</li>
+  <li>${home ? `✅ Punkt startu (dom): ${esc(home.label)}` : "❌ Brak punktu startu (dom)"}</li></ul>
+  <form method="post">${hidden}<input name="home_address" placeholder="Adres startu, np. ulica 1, Warszawa" style="width:100%;padding:.5rem;margin-bottom:.5rem">
+  ${btn("set_home", "Zapisz punkt startu")} ${btn("routes_test", "Wygeneruj testowe trasy 5 km")}</form>`;
 }
 
 async function handleSetup(request: Request, env: Env, origin: string): Promise<Response> {
@@ -381,6 +471,26 @@ async function handleSetup(request: Request, env: Env, origin: string): Promise<
         await coach(env).wakeNow("TEST_Z_PANELU (sprawdź kontekst; napisz do Jana tylko jeśli jest ku temu powód)");
         notice = "Trener zostanie obudzony w ciągu kilku sekund. Odśwież za chwilę, by zobaczyć wynik.";
         break;
+      case "set_home": {
+        if (!env.ORS_API_KEY) throw new Error("Najpierw dodaj sekret ORS_API_KEY.");
+        const h = await geocode(env.ORS_API_KEY, String(form.get("home_address") ?? ""));
+        await coach(env).setHome(h);
+        notice = `Punkt startu zapisany: ${h.label} (${h.lat.toFixed(5)}, ${h.lon.toFixed(5)}).`;
+        break;
+      }
+      case "routes_test": {
+        if (!env.ORS_API_KEY) throw new Error("Najpierw dodaj sekret ORS_API_KEY.");
+        const { home } = await coach(env).getRouteSettings();
+        if (!home) throw new Error("Najpierw zapisz punkt startu.");
+        await coach(env).setOrigin(origin);
+        const options = await proposeLoops(env.ORS_API_KEY, home, 5);
+        const id = crypto.randomUUID().replace(/-/g, "").slice(0, 16);
+        await coach(env).saveProposal({ id, created: new Date().toISOString(), target_km: 5, start: home, start_label: "dom", options });
+        notice = options
+          .map((o) => `Trasa ${o.label}: ${o.distance_km} km, nieutwardzona ${o.unpaved_pct}%, zieleń ${o.green_avg}/10 → ${origin}/trasa/${id}/${o.label}`)
+          .join(" | ");
+        break;
+      }
       case "garmin_test": {
         const g = garminClient(env);
         if (!g) throw new Error(NO_GARMIN);
@@ -405,7 +515,24 @@ const defaultHandler = {
     const url = new URL(request.url);
     const html = { "content-type": "text/html;charset=utf-8" };
 
-    if (url.pathname === "/telegram" && request.method === "POST") return handleTelegramWebhook(request, env);
+    if (url.pathname === "/telegram" && request.method === "POST") {
+      await coach(env).setOrigin(url.origin);
+      return handleTelegramWebhook(request, env);
+    }
+    const route = /^\/trasa\/([a-f0-9]{16})\/([A-Z])(\.gpx)?$/.exec(url.pathname);
+    if (route) {
+      const p = await coach(env).getProposal(route[1]);
+      const o = p?.options.find((x) => x.label === route[2]);
+      if (!p || !o) return new Response("Nie ma takiej trasy", { status: 404 });
+      const name = `Trasa ${o.label} ${o.distance_km} km`;
+      if (route[3]) {
+        return new Response(toGpx(name, o.coords), {
+          headers: { "content-type": "application/gpx+xml", "content-disposition": `attachment; filename="trasa-${o.label}.gpx"` },
+        });
+      }
+      const title = `${name}: ${o.unpaved_pct}% nieutwardzonej, zieleń ${o.green_avg}/10`;
+      return new Response(mapPage(esc(title), o.coords, `/trasa/${p.id}/${o.label}.gpx`), { headers: html });
+    }
     if (url.pathname === "/setup") return handleSetup(request, env, url.origin);
     if (url.pathname !== "/authorize") return new Response("Not found", { status: 404 });
 

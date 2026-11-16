@@ -71,6 +71,8 @@ You will see a password page. Enter your `MCP_PASSWORD`. Once connected on web, 
 | `getActivityDetails` | Per-km splits, stops and walking time for one activity |
 | `getGarminRecovery` | Garmin Connect Personal API: sleep, HRV, stress, Body Battery, daily summary |
 | `getGarminFitness` | Garmin Connect Personal API: VO2max, fitness age |
+| `proposeRoutes` | Two running loops (OpenRouteService) of a given length, preferring unpaved paths and greenery |
+| `chooseRoute` | Sends the chosen loop as GPX on Telegram |
 | `getCoachContext` | Coach agent: instructions, memory, conversation, data snapshot |
 | `sendMessage` | Coach agent: sends a Telegram message |
 | `updateMemory` | Coach agent: notes, open items, self-scheduled check-ins |

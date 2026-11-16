@@ -54,6 +54,13 @@ export async function handleTelegramWebhook(request: Request, env: Env): Promise
   if (String(msg.chat?.id) !== String(env.TELEGRAM_CHAT_ID)) return new Response("ok"); // ignore strangers
 
   let text: string = msg.text ?? msg.caption ?? "";
+  if (!text && msg.location) {
+    const at = new Date((msg.edit_date ?? msg.date ?? Date.now() / 1000) * 1000).toISOString();
+    await coach(env).setLastLocation({ lat: msg.location.latitude, lon: msg.location.longitude, at });
+    // Live-location updates arrive as edits every few seconds: store, but don't wake the coach.
+    if (update.edited_message) return new Response("ok");
+    text = "[Jan udostępnił swoją lokalizację: trasy na najbliższe 3 godziny startują z tego miejsca]";
+  }
   if (!text) {
     if (msg.voice) text = "[Jan wysłał wiadomość głosową; trener jej nie odsłuchuje, poproś o tekst]";
     else if (msg.photo) text = "[Jan wysłał zdjęcie bez opisu]";
@@ -65,6 +72,18 @@ export async function handleTelegramWebhook(request: Request, env: Env): Promise
   const at = new Date((msg.date ?? Date.now() / 1000) * 1000).toISOString();
   await coach(env).addIncoming(text, at);
   return new Response("ok");
+}
+
+/** Sends a file (e.g. a GPX route) to Jan. */
+export async function sendTelegramFile(env: Env, filename: string, content: string, caption: string, mime = "application/gpx+xml") {
+  if (!env.TELEGRAM_BOT_TOKEN || !env.TELEGRAM_CHAT_ID) throw new Error("Telegram nie jest skonfigurowany");
+  const form = new FormData();
+  form.append("chat_id", String(env.TELEGRAM_CHAT_ID));
+  form.append("caption", caption.slice(0, 1000));
+  form.append("document", new File([content], filename, { type: mime }));
+  const res = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendDocument`, { method: "POST", body: form });
+  const json: any = await res.json().catch(() => ({}));
+  if (!res.ok || json.ok === false) throw new Error(`Telegram sendDocument ${res.status}: ${json.description ?? ""}`);
 }
 
 export function coach(env: Env) {
