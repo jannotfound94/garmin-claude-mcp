@@ -5,7 +5,7 @@ import {
   DEFAULT_CONFIG, classifyDay, computeTargets, estimateTdee, evaluateReminders, labelForTime, normalizeItem,
   overallConfidence, parseSlots, satisfiedSlots, slotKey, slotsFor, sumMacros, weightSlopePerDay, weightStats, dateOfMealId, newMealId,
 } from "../src/nutrition";
-import { parseAnalysis, applyBarcode, analyzeMeal } from "../src/gemini";
+import { parseAnalysis, applyBarcode, analyzeMeal, GeminiTransientError } from "../src/gemini";
 
 const S = (t: string): any => (parseSlots(t) as any).slots;
 const cfg = { ...DEFAULT_CONFIG, slots: S("śniadanie 07:30; obiad 13:30; kolacja 19:30") };
@@ -359,4 +359,48 @@ test("goalProgress: remaining kg, trend and weeks to goal; rare weigh-ins give n
   assert.equal(rare.daysSinceWeighIn, 3);
   assert.equal(goalProgress([], 95, today).toGoKg, null);
   assert.equal(goalProgress(w, 106, today).weeksToGoal, null); // cel już osiągnięty
+});
+
+test("analyzeMeal failure classes: transient (503/429/timeout/truncated JSON) vs permanent (404/400/blocked)", async () => {
+  const orig = globalThis.fetch;
+  const timeout = () => Object.assign(new Error("The operation was aborted due to timeout"), { name: "TimeoutError" });
+  const run = async (behave: (model: string, call: number) => Response | Error) => {
+    const calls: Record<string, number> = {};
+    globalThis.fetch = (async (url: any) => {
+      const m = String(url).split("/models/")[1].split(":")[0];
+      calls[m] = (calls[m] ?? 0) + 1;
+      const r = behave(m, calls[m]);
+      if (r instanceof Error) throw r;
+      return r;
+    }) as any;
+    try { await analyzeMeal({ GEMINI_API_KEY: "k" } as any, input); return null; } catch (e) { return e as Error; }
+  };
+  try {
+    // scenariusz z produkcji: główny model timeout, zapasowy 503
+    let e = await run((m) => (m === "gemini-3.5-flash" ? timeout() : new Response("overloaded", { status: 503 })));
+    assert.ok(e instanceof GeminiTransientError, String(e));
+    assert.match(e!.message, /brak odpowiedzi w ciągu/);
+    assert.match(e!.message, /503/);
+    // 429 na obu
+    e = await run(() => new Response("quota", { status: 429 }));
+    assert.ok(e instanceof GeminiTransientError);
+    // ucięty JSON na obu
+    e = await run(() => new Response(JSON.stringify({ candidates: [{ finishReason: "MAX_TOKENS", content: { parts: [{ text: "{ucięty" }] } }] })));
+    assert.ok(e instanceof GeminiTransientError);
+    // regresja: główny model odrzuca thinkingLevel (400), potem timeout; zapasowy 503 -> nadal chwilowy, nie trwały
+    e = await run((m, call) => (m === "gemini-3.5-flash" ? (call === 1 ? new Response("thinking_level unsupported", { status: 400 }) : timeout()) : new Response("overloaded", { status: 503 })));
+    assert.ok(e instanceof GeminiTransientError, String(e));
+    // trwałe: zła nazwa modelu (404) na obu
+    e = await run(() => new Response("model not found", { status: 404 }));
+    assert.ok(e && !(e instanceof GeminiTransientError));
+    // trwałe: wszystkie warianty 400 (zły request)
+    e = await run(() => new Response("bad request", { status: 400 }));
+    assert.ok(e && !(e instanceof GeminiTransientError));
+    // trwałe: treść zablokowana
+    e = await run(() => new Response(JSON.stringify({ promptFeedback: { blockReason: "SAFETY" }, candidates: [] })));
+    assert.ok(e && !(e instanceof GeminiTransientError));
+    // 404 na głównym i 503 na zapasowym: trwały błąd konfiguracji ma pierwszeństwo (ponawianie nie naprawi nazwy modelu)
+    e = await run((m) => (m === "gemini-3.5-flash" ? new Response("gone", { status: 404 }) : new Response("overloaded", { status: 503 })));
+    assert.ok(e && !(e instanceof GeminiTransientError));
+  } finally { globalThis.fetch = orig; }
 });

@@ -4,11 +4,12 @@
  */
 import { GarminPersonal } from "./garmin";
 import { Icu } from "./icu";
-import { analyzeMeal, applyBarcode, toBase64 } from "./gemini";
+import { GeminiTransientError, analyzeMeal, applyBarcode, toBase64 } from "./gemini";
 import {
   CONFIDENCE_PL,
   DAY_TYPE_PL,
   type DayType,
+  type DietJob,
   type EnergyBase,
   GARMIN_ACTIVE_HAIRCUT,
   RUN_KCAL_PER_KG_KM,
@@ -310,7 +311,11 @@ async function guard(env: Env, what: string, fn: () => Promise<void>) {
   } catch (e) {
     console.error(`diet:${what}`, e);
     const msg = String(e instanceof Error ? e.message : e).replace(/key=[^&\s]+/g, "key=…").slice(0, 180);
-    await say(env, `⚠️ Ups, coś nie pykło (${what}): ${msg}\n${FAIL_HINT}`).catch(() => {});
+    const text =
+      e instanceof GeminiTransientError
+        ? `⚠️ Gemini nadal nie odpowiada mimo kilku prób (${what}). Wrzuć to jeszcze raz za kilka minut albo wpisz posiłek tekstem: /jem 2 jajka, kromka chleba, masło\n(${msg})`
+        : `⚠️ Ups, coś nie pykło (${what}): ${msg}\n${FAIL_HINT}`;
+    await say(env, text).catch(() => {});
   }
 }
 
@@ -320,34 +325,38 @@ async function needGemini(env: Env): Promise<boolean> {
   return true;
 }
 
-async function logPhoto(env: Env, msg: any) {
+/** Opcje czasu dla ponowień w tle (budzik Durable Object nie ma 30-sekundowego limitu pracy po odpowiedzi do Telegrama). */
+interface MealRun {
+  budgetMs?: number;
+  attemptCapMs?: number;
+}
+
+async function logPhoto(env: Env, fileId: string, note: string, unix: number, run: MealRun) {
   if (await needGemini(env)) return;
   await tg(env, "sendChatAction", { chat_id: chatId(env), action: "typing" }).catch(() => {});
-  const fileId: string = msg.photo ? msg.photo[msg.photo.length - 1].file_id : msg.document.file_id;
-  const note = String(msg.caption ?? "").trim();
   const image = await downloadTelegramFile(env, fileId);
-  const now = warsaw(new Date(msg.date * 1000));
-  const a = await analyzeMeal(env, { image, note, nowLocal: now, slotNames: await slotNamesFor(env, now.date) });
+  const now = warsaw(new Date(unix * 1000));
+  const a = await analyzeMeal(env, { image, note, nowLocal: now, slotNames: await slotNamesFor(env, now.date), ...run });
   if (!a.isFood) {
     await say(env, "Janek, nie widzę tu żadnego jedzenia ani picia 🤔 Jak to jednak posiłek, dopisz opis: /jem …");
     return;
   }
-  await storeAndAnnounce(env, a, { source: "photo", note, photoFileId: fileId, msgUnix: msg.date });
+  await storeAndAnnounce(env, a, { source: "photo", note, photoFileId: fileId, msgUnix: unix });
 }
 
-async function logText(env: Env, msg: any, text: string) {
+async function logText(env: Env, unix: number, text: string, run: MealRun) {
   if (await needGemini(env)) return;
   await tg(env, "sendChatAction", { chat_id: chatId(env), action: "typing" }).catch(() => {});
-  const at = warsaw(new Date(msg.date * 1000));
-  const a = await analyzeMeal(env, { note: text, nowLocal: at, slotNames: await slotNamesFor(env, at.date) });
+  const at = warsaw(new Date(unix * 1000));
+  const a = await analyzeMeal(env, { note: text, nowLocal: at, slotNames: await slotNamesFor(env, at.date), ...run });
   if (!a.isFood) {
     await say(env, "Nie wyłapałem z tego nic do jedzenia. Napisz np.: /jem owsianka 60 g z mlekiem i bananem");
     return;
   }
-  await storeAndAnnounce(env, a, { source: "text", note: text, msgUnix: msg.date });
+  await storeAndAnnounce(env, a, { source: "text", note: text, msgUnix: unix });
 }
 
-async function correctMeal(env: Env, mealId: string, text: string, msg: any) {
+async function correctMeal(env: Env, mealId: string, text: string, unix: number, run: MealRun) {
   if (await needGemini(env)) return;
   const st = coach(env);
   const meal = await st.findMeal(mealId);
@@ -359,8 +368,9 @@ async function correctMeal(env: Env, mealId: string, text: string, msg: any) {
   const a = await analyzeMeal(env, {
     note: text,
     previous: { label: meal.label, note: meal.note, items: meal.items },
-    nowLocal: warsaw(new Date(msg.date * 1000)),
+    nowLocal: warsaw(new Date(unix * 1000)),
     slotNames: await slotNamesFor(env, meal.date),
+    ...run,
   });
   if (!a.isFood) {
     await say(env, "Nie załapałem tej poprawki, niczego nie zmieniłem. Napisz np.: „to było 200 g”, „bez sosu”, „to skyr naturalny”.");
@@ -384,6 +394,52 @@ async function correctMeal(env: Env, mealId: string, text: string, msg: any) {
     "✏️ Poprawiono.",
     ...(used ? [`🏷 Wartości z bazy Open Food Facts: ${used}`] : []),
   ]);
+}
+
+// ---------------- zadania ponawiane w tle ----------------
+
+/** Opóźnienia kolejnych ponowień po chwilowej awarii Gemini (s): po 1 min, 2,5 min i 6,5 min. */
+const RETRY_DELAYS_S = [60, 150, 400];
+const BACKGROUND_RUN: MealRun = { budgetMs: 90_000, attemptCapMs: 45_000 };
+
+const newJob = (kind: DietJob["kind"], at: number, extra: Partial<DietJob>): DietJob => ({
+  id: crypto.randomUUID().slice(0, 8),
+  kind,
+  at,
+  attempts: 0,
+  nextAt: 0,
+  ...extra,
+});
+
+const JOB_LABEL: Record<DietJob["kind"], string> = { photo: "Rozpoznanie zdjęcia", text: "Zapis posiłku", correct: "Poprawka posiłku" };
+
+async function runMealTask(env: Env, job: DietJob) {
+  const run = job.attempts > 0 ? BACKGROUND_RUN : {};
+  if (job.kind === "photo") await logPhoto(env, job.fileId!, job.text ?? "", job.at, run);
+  else if (job.kind === "text") await logText(env, job.at, job.text ?? "", run);
+  else await correctMeal(env, job.mealId!, job.text ?? "", job.at, run);
+}
+
+/**
+ * Jedna próba zadania. Gdy Gemini jest chwilowo niedostępny (przeciążenie, limit, timeout), zadanie trafia do kolejki
+ * i wróci z budzika Durable Object; Jan dostaje jedną wiadomość o tym. Inne błędy lecą dalej do guard() (komunikat o błędzie).
+ * Ponawiamy tylko błędy Gemini, które występują przed zapisem posiłku, więc ponowienie nie robi duplikatów.
+ */
+async function attemptJob(env: Env, job: DietJob) {
+  try {
+    await runMealTask(env, job);
+  } catch (e) {
+    if (!(e instanceof GeminiTransientError) || job.attempts >= RETRY_DELAYS_S.length) throw e;
+    await coach(env).enqueueDietJob({ ...job, attempts: job.attempts + 1, nextAt: Date.now() + RETRY_DELAYS_S[job.attempts] * 1000 });
+    if (job.attempts === 0) {
+      await say(env, "⏳ Gemini jest chwilowo przeciążony. Spróbuję sam jeszcze kilka razy w ciągu paru minut, nic nie musisz robić (i nie wysyłaj tego drugi raz).").catch(() => {});
+    }
+  }
+}
+
+/** Wołane z budzika Durable Object dla zadań, których termin minął. */
+export async function processDietJob(env: Env, job: DietJob): Promise<void> {
+  await guard(env, JOB_LABEL[job.kind], () => attemptJob(env, job));
 }
 
 // ---------------- komendy ----------------
@@ -661,7 +717,7 @@ const COMMANDS: Record<string, (env: Env, arg: string, msg: any) => Promise<void
   przypomnienia: (env, arg) => cmdReminders(env, arg),
   jem: async (env, arg, msg) => {
     if (!arg.trim()) await say(env, "Napisz, co wrzuciłeś na ząb, np. /jem owsianka 60 g z mlekiem i bananem");
-    else await logText(env, msg, arg.trim());
+    else await attemptJob(env, newJob("text", msg.date, { text: arg.trim() }));
   },
 };
 
@@ -682,7 +738,9 @@ export async function routeDietMessage(env: Env, msg: any, isEdit: boolean, ctx:
       ctx.waitUntil(say(env, "📎 Z albumu ogarniam tylko pierwsze zdjęcie. Resztę wrzuć osobno albo dopisz /jem …").catch(() => {}));
       return true;
     }
-    ctx.waitUntil(guard(env, "Rozpoznanie zdjęcia", () => logPhoto(env, msg)));
+    const fileId: string = msg.photo ? msg.photo[msg.photo.length - 1].file_id : msg.document.file_id;
+    const job = newJob("photo", msg.date, { fileId, text: String(msg.caption ?? "").trim() });
+    ctx.waitUntil(guard(env, JOB_LABEL.photo, () => attemptJob(env, job)));
     return true;
   }
   if (!text) return false;
@@ -717,12 +775,14 @@ export async function routeDietMessage(env: Env, msg: any, isEdit: boolean, ctx:
   if (typeof replyTo === "number") {
     const mealId = await coach(env).mealForMessage(replyTo);
     if (mealId) {
-      ctx.waitUntil(guard(env, "Poprawka posiłku", () => correctMeal(env, mealId, text, msg)));
+      const job = newJob("correct", msg.date, { mealId, text });
+      ctx.waitUntil(guard(env, JOB_LABEL.correct, () => attemptJob(env, job)));
       return true;
     }
   }
   if (NATURAL_MEAL.test(text)) {
-    ctx.waitUntil(guard(env, "Zapis posiłku", () => logText(env, msg, text)));
+    const job = newJob("text", msg.date, { text });
+    ctx.waitUntil(guard(env, JOB_LABEL.text, () => attemptJob(env, job)));
     return true;
   }
   return false;

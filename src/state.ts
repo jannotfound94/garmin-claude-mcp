@@ -2,7 +2,7 @@ import { DurableObject } from "cloudflare:workers";
 import { fmtWarsaw } from "./time";
 import type { GarminToken } from "./garmin";
 import type { LatLon, RouteProposal } from "./routes";
-import { DEFAULT_CONFIG, type Meal, type NutritionConfig, type Weight, dateOfMealId } from "./nutrition";
+import { DEFAULT_CONFIG, type DietJob, type Meal, type NutritionConfig, type Weight, dateOfMealId } from "./nutrition";
 
 export interface Favorite {
   name: string;
@@ -169,21 +169,71 @@ export class CoachState extends DurableObject<Env> {
   }
 
   async alarm() {
+    await this.runDietJobs().catch((e) => console.error("diet jobs", e));
     const m = await this.load();
-    if (!m.pending.length) return;
-    const reasons = m.pending;
-    const res = await fireRoutine(this.env, reasons);
-    m.fires.push({ at: new Date().toISOString(), reasons, ok: res.ok, info: res.info });
-    m.fires = m.fires.slice(-20);
-    if (res.ok) {
-      m.pending = [];
-      m.lastWakeReasons = reasons;
-    } else if (res.retry) {
-      await this.ctx.storage.setAlarm(Date.now() + RETRY_MS);
-    } else {
-      m.pending = []; // not configured / permanent error: drop, visible on /setup
+    if (m.pending.length) {
+      const reasons = m.pending;
+      const res = await fireRoutine(this.env, reasons);
+      m.fires.push({ at: new Date().toISOString(), reasons, ok: res.ok, info: res.info });
+      m.fires = m.fires.slice(-20);
+      if (res.ok) {
+        m.pending = [];
+        m.lastWakeReasons = reasons;
+      } else if (res.retry) {
+        await this.ctx.storage.setAlarm(Date.now() + RETRY_MS);
+      } else {
+        m.pending = []; // not configured / permanent error: drop, visible on /setup
+      }
+      await this.save(m);
     }
-    await this.save(m);
+    await this.rescheduleDietJobs();
+  }
+
+  // ---------- zadania dietetyka ponawiane w tle (Gemini chwilowo przeciążony) ----------
+  // Budzik Durable Object nie ma 30-sekundowego limitu pracy w tle po odpowiedzi do Telegrama, więc ponowienia mogą
+  // czekać na Gemini dłużej. Wspólny budzik obsługuje też pobudki trenera: bierzemy najwcześniejszy termin.
+
+  private async ensureAlarmAt(ts: number) {
+    const existing = await this.ctx.storage.getAlarm();
+    if (existing == null || existing > ts) await this.ctx.storage.setAlarm(ts);
+  }
+
+  async enqueueDietJob(job: DietJob) {
+    const list = (await this.ctx.storage.get<DietJob[]>("nut:jobs")) ?? [];
+    list.push(job);
+    await this.ctx.storage.put("nut:jobs", list);
+    await this.ensureAlarmAt(job.nextAt);
+  }
+
+  async dietJobs(): Promise<DietJob[]> {
+    return (await this.ctx.storage.get<DietJob[]>("nut:jobs")) ?? [];
+  }
+
+  private async runDietJobs() {
+    const now = Date.now();
+    const list = await this.dietJobs();
+    const due = list.filter((j) => j.nextAt <= now);
+    if (!due.length) return;
+    // Najpierw usuwamy zadania z kolejki (co najwyżej jedno wykonanie): nieudane i ponawialne wracają przez enqueueDietJob.
+    await this.ctx.storage.put(
+      "nut:jobs",
+      list.filter((j) => j.nextAt > now),
+    );
+    // Wewnątrz własnego budzika wołamy metody tego obiektu bezpośrednio, a nie przez uchwyt (stub) do samego siebie.
+    const selfEnv = { ...this.env, COACH_STATE: { get: () => this, idFromName: () => "self" } } as unknown as Env;
+    const { processDietJob } = await import("./diet");
+    for (const j of due) {
+      try {
+        await processDietJob(selfEnv, j);
+      } catch (e) {
+        console.error("diet job failed", e);
+      }
+    }
+  }
+
+  private async rescheduleDietJobs() {
+    const rest = await this.dietJobs();
+    if (rest.length) await this.ensureAlarmAt(Math.min(...rest.map((j) => j.nextAt)));
   }
 
   // ---------- Garmin Personal API bearer token cache ----------

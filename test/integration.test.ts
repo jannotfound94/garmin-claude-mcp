@@ -41,6 +41,7 @@ globalThis.fetch = (async (url: any, init?: any) => {
     geminiBodies.push(JSON.parse(init.body));
     const next = geminiQueue.shift();
     if (!next) throw new Error("unexpected gemini call");
+    if (next.__status) return new Response("model overloaded", { status: next.__status });
     return new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: JSON.stringify(next) }] } }] }));
   }
   if (u.includes("personal.connectapi.garmin.com")) {
@@ -407,5 +408,105 @@ test("/cel garmin, /cel termin, /cel deficyt validation; /waga shows plan and re
   await send({ message: { chat, date: now(), text: "/cel deficyt 600\n/cel garmin 0,9" } });
   assert.equal((await state.getNutCfg()).deficitKcal, 600);
   assert.equal((await state.getNutCfg()).garminFactor, 0.9);
+  mock.timers.reset();
+});
+
+const OVERLOADED = { __status: 503 };
+const eggMeal = { is_food: true, meal_label: "Fritata", items: [{ name: "fritata z 4 jaj", grams: 300, kcal: 520, protein_g: 36, carbs_g: 8, fat_g: 38, confidence: "medium", basis: "estimate" }] };
+
+test("Gemini overloaded: job is queued, retried by the alarm without Jan resending, meal saved once", async () => {
+  mock.timers.reset(); mock.timers.enable({ apis: ["Date"], now: new Date("2026-12-01T10:00:00Z") });
+  state.env = env; // budzik wykonuje się w obiekcie z własnym env
+  store.delete("nut:jobs"); store.delete("nut:meals:2026-12-01");
+  sent.length = 0;
+  // pierwsza próba: oba modele 503 (po 1 odpowiedzi na model)
+  geminiQueue.length = 0;
+  geminiQueue.push(OVERLOADED, OVERLOADED);
+  await send({ message: { chat, date: now(), text: "/jem 40 g fety i cztery jajka L, garść pomidorków, czyli frittata" } });
+  assert.match(lastText(), /^⏳ Gemini jest chwilowo przeciążony/);
+  assert.equal((await state.getMeals("2026-12-01")).length, 0);
+  let jobs = await state.dietJobs();
+  assert.equal(jobs.length, 1);
+  assert.equal(jobs[0].attempts, 1);
+  assert.equal(jobs[0].nextAt, Date.now() + 60_000);
+  assert.equal(jobs[0].text, "40 g fety i cztery jajka L, garść pomidorków, czyli frittata");
+
+  // budzik przed terminem nic nie robi
+  await state.alarm();
+  assert.equal((await state.dietJobs()).length, 1);
+  assert.equal((await state.getMeals("2026-12-01")).length, 0);
+
+  // po minucie: znów 503 -> kolejne ponowienie (po 2,5 min), bez nowej wiadomości o przeciążeniu
+  mock.timers.setTime(new Date("2026-12-01T10:01:01Z").getTime());
+  geminiQueue.push(OVERLOADED, OVERLOADED);
+  const before = sent.length;
+  await state.alarm();
+  jobs = await state.dietJobs();
+  assert.equal(jobs.length, 1);
+  assert.equal(jobs[0].attempts, 2);
+  assert.equal(jobs[0].nextAt, Date.now() + 150_000);
+  assert.equal(sent.length, before, "tylko jedna wiadomość o przeciążeniu");
+
+  // po kolejnych 2,5 min Gemini wraca: posiłek zapisany raz, wiadomość z posiłkiem, kolejka pusta
+  mock.timers.setTime(new Date("2026-12-01T10:03:40Z").getTime());
+  geminiQueue.push(eggMeal);
+  await state.alarm();
+  const meals = await state.getMeals("2026-12-01");
+  assert.equal(meals.length, 1);
+  assert.equal(meals[0].label, "Fritata");
+  assert.equal(meals[0].note, "40 g fety i cztery jajka L, garść pomidorków, czyli frittata");
+  assert.match(lastText(), /Ten posiłek: 520 kcal/);
+  assert.equal((await state.dietJobs()).length, 0);
+  // ponowne uruchomienie budzika nie dubluje wpisu
+  await state.alarm();
+  assert.equal((await state.getMeals("2026-12-01")).length, 1);
+  // ponowienia dostały większy budżet czasu niż pierwsza próba
+  mock.timers.reset();
+});
+
+test("Gemini keeps failing: after 3 retries Jan gets one final error message and the queue is empty; permanent errors are not queued", async () => {
+  mock.timers.reset(); mock.timers.enable({ apis: ["Date"], now: new Date("2026-12-02T10:00:00Z") });
+  state.env = env;
+  store.delete("nut:jobs"); sent.length = 0; geminiQueue.length = 0;
+  geminiQueue.push(OVERLOADED, OVERLOADED);
+  await send({ message: { chat, date: now(), text: "/jem jajka" } });
+  assert.match(lastText(), /^⏳/);
+  for (const [i, min] of [[1, 2], [2, 5], [3, 12]] as const) {
+    mock.timers.setTime(new Date(`2026-12-02T10:${String(min).padStart(2, "0")}:00Z`).getTime());
+    geminiQueue.push(OVERLOADED, OVERLOADED);
+    await state.alarm();
+  }
+  assert.equal((await state.dietJobs()).length, 0);
+  assert.match(lastText(), /^⚠️ Gemini nadal nie odpowiada mimo kilku prób \(Zapis posiłku\)/);
+  assert.equal((await state.getMeals("2026-12-02")).length, 0);
+  const waiting = sent.filter((m) => /^⏳/.test(m.text)).length;
+  assert.equal(waiting, 1);
+
+  // błąd trwały (zła nazwa modelu na obu): komunikat od razu, bez kolejki
+  sent.length = 0; geminiQueue.length = 0;
+  geminiQueue.push({ __status: 404 }, { __status: 404 });
+  await send({ message: { chat, date: now(), text: "/jem jajka" } });
+  assert.match(lastText(), /^⚠️ Ups, coś nie pykło \(Komenda \/jem\)/);
+  assert.equal((await state.dietJobs()).length, 0);
+  mock.timers.reset();
+});
+
+test("photo job is retried with the stored file id and caption", async () => {
+  mock.timers.reset(); mock.timers.enable({ apis: ["Date"], now: new Date("2026-12-03T10:00:00Z") });
+  state.env = env;
+  store.delete("nut:jobs"); sent.length = 0; geminiQueue.length = 0;
+  geminiQueue.push(OVERLOADED, OVERLOADED);
+  await send({ message: { chat, date: now(), caption: "to frittata", photo: [{ file_id: "small" }, { file_id: "BIGPHOTO" }] } });
+  const jobs = await state.dietJobs();
+  assert.equal(jobs[0].kind, "photo");
+  assert.equal(jobs[0].fileId, "BIGPHOTO");
+  assert.equal(jobs[0].text, "to frittata");
+  mock.timers.setTime(new Date("2026-12-03T10:01:05Z").getTime());
+  geminiQueue.push(eggMeal);
+  await state.alarm();
+  const m = (await state.getMeals("2026-12-03"))[0];
+  assert.equal(m.source, "photo");
+  assert.equal(m.photoFileId, "BIGPHOTO");
+  assert.equal(m.note, "to frittata");
   mock.timers.reset();
 });
