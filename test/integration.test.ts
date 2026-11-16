@@ -224,7 +224,9 @@ test("nutritionReport shape (no Garmin)", async () => {
   assert.equal(r.kalibracja_zapotrzebowania.ready, false);
   assert.match(String(r.garmin_uwagi), /nie jest podłączony/);
   assert.equal(r.typ_dnia.typ, "dzień bez biegu");
-  assert.ok(r.cele_dzis.kcal > 1800);
+  assert.ok(r.cele_dzis.kcal > 1500);
+  assert.equal(r.ustawienia.korekta_garmina, 0.9);
+  assert.equal(r.waga.termin_celu, "2027-04-25");
   assert.equal(r.ustawienia.deficyt_kcal, 600);
   assert.equal(r.waga.waga_docelowa_kg, 95);
   assert.equal(r.waga.do_celu_kg, -14.5); // 80,5 - 95
@@ -300,13 +302,14 @@ test("Garmin energy base is a median (outlier day ignored), /spalanie shows days
   await send({ message: { chat, date: now(), text: "/cel" } });
   const cel = lastText();
   assert.doesNotMatch(cel, /3870/);
-  assert.match(cel, /Kcal od spokojnego dnia z Garmina: spoczynkowe 2500 \+ lekka aktywność 425/); // 500 aktywnych z najspokojniejszych dni ×0,85; dzień 20000 nie ma wpływu
+  assert.match(cel, /Kcal od spokojnego dnia z Garmina: \(spoczynkowe 2500 \+ lekka aktywność 425, aktywne ×0,85\) ×0,9 = 2633/); // 500 aktywnych z najspokojniejszych dni ×0,85; dzień 20000 nie ma wpływu
   assert.match(cel, /dzień bez biegu \(ok\. 0 km\)|dzień bez biegu:/);
   await send({ message: { chat, date: now(), text: "/spalanie" } });
   const burn = lastText();
   assert.equal(sent[sent.length - 1].parse_mode, "HTML");
   assert.match(burn, /11-15: <b>22500<\/b> = 2500 \+ 20000/);
-  assert.match(burn, /Spokojny dzień \(baza celów\): <b>2500 \+ 425 = 2925<\/b> kcal/);
+  assert.match(burn, /Spokojny dzień wg Garmina: 2500 \+ 425 = 2925 kcal/);
+  assert.match(burn, /Po korekcie ×0,9 \(zegarek zawyża\): <b>2633<\/b> kcal, to baza celów/);
   assert.match(burn, /najbardziej aktywny: 19500 kcal/);
   env.GARMIN_PERSONAL_API_KEY = undefined;
   mock.timers.reset();
@@ -345,20 +348,64 @@ test("/cel cel sets the goal weight; /waga shows progress and reaching the goal"
   mock.timers.reset();
 });
 
-test("config: old stored copy (deficit 400 baked in) migrates to the new default; explicit overrides survive and only overrides are stored", async () => {
-  await storage.put("nut:cfg", { slots: [], weekendSlots: [], remindersOn: true, remindAfterMin: 180, proteinPerKg: 1.8, fatPerKg: 1.0, carbsPerKg: { rest: 3.5, easy: 4.5, quality: 6, long: 7 }, deficitKcal: 400, macroWeightKg: 95, weightFallbackKg: null });
-  const c = await state.getNutCfg();
+test("config: v1/v2 stored copies migrate (baked-in old defaults dropped), explicit overrides survive, only overrides are stored", async () => {
+  await storage.put("nut:cfg", { slots: [{ name: "obiad", time: "13:30" }], weekendSlots: [], remindersOn: true, remindAfterMin: 180, proteinPerKg: 1.8, fatPerKg: 1.0, carbsPerKg: { rest: 3.5, easy: 4.5, quality: 6, long: 7 }, deficitKcal: 400, macroWeightKg: 95, weightFallbackKg: null });
+  let c = await state.getNutCfg();
   assert.equal(c.deficitKcal, 600); // nowa domyślna, nie zapisane 400
+  assert.equal(c.proteinPerKg, 1.6); // stara domyślna 1,8 odrzucona
+  assert.equal(c.fatPerKg, 0.8);
   assert.equal(c.macroWeightKg, 95); // świadome ustawienie zostaje
+  assert.equal(c.slots[0].name, "obiad"); // plan posiłków zostaje
   assert.equal(c.goalWeightKg, 95);
-  await state.patchNutCfg({ deficitKcal: 400 }); // świadomy wybór 400 po migracji musi zostać
-  assert.equal((await state.getNutCfg()).deficitKcal, 400);
+  assert.equal(c.goalDate, "2027-04-25");
+  assert.equal(c.garminFactor, 0.9);
+  // stan v2 (po pierwszej migracji) z wbitymi 1,8/1,0 też jest czyszczony
+  await storage.put("nut:cfg", { cfgV: 2, proteinPerKg: 1.8, fatPerKg: 1.0, remindAfterMin: 120 });
+  c = await state.getNutCfg();
+  assert.equal(c.proteinPerKg, 1.6);
+  assert.equal(c.remindAfterMin, 120);
+  // świadomy wybór po migracji musi zostać, także gdy równa się starej domyślnej
+  await state.patchNutCfg({ proteinPerKg: 1.8, deficitKcal: 400 });
+  c = await state.getNutCfg();
+  assert.equal(c.proteinPerKg, 1.8);
+  assert.equal(c.deficitKcal, 400);
   const stored = store.get("nut:cfg");
-  assert.equal(stored.cfgV, 2);
-  assert.equal(stored.proteinPerKg, 1.8); // pozostałość po wersji 1 (równa domyślnej) jest nieszkodliwa
-  await state.patchNutCfg({ deficitKcal: 600 });
-  assert.equal(store.get("nut:cfg").deficitKcal, 600);
+  assert.equal(stored.cfgV, 3);
+  assert.equal(stored.fatPerKg, undefined);
+  await state.patchNutCfg({ proteinPerKg: 1.6, deficitKcal: 600 });
   await state.patchNutCfg({ remindersOn: false });
   assert.equal(store.get("nut:cfg").remindersOn, false);
   await state.patchNutCfg({ remindersOn: true });
+});
+
+test("/cel garmin, /cel termin, /cel deficyt validation; /waga shows plan and required pace", async () => {
+  mock.timers.reset(); mock.timers.enable({ apis: ["Date"], now: new Date("2026-12-16T10:00:00Z") });
+  await storage.put("nut:cfg", { cfgV: 3 });
+  store.set("nut:weights", [{ date: "2026-11-16", kg: 107 }]);
+  await send({ message: { chat, date: now(), text: "/cel garmin 0,85" } });
+  assert.equal((await state.getNutCfg()).garminFactor, 0.85);
+  assert.match(lastText(), /Korekta Garmina ×0,85/);
+  await send({ message: { chat, date: now(), text: "/cel garmin 2" } });
+  assert.match(lastText(), /Korekta Garmina: 0,7–1,1/);
+  assert.equal((await state.getNutCfg()).garminFactor, 0.85);
+  await send({ message: { chat, date: now(), text: "/cel deficyt 800" } });
+  assert.equal((await state.getNutCfg()).deficitKcal, 800);
+  await send({ message: { chat, date: now(), text: "/cel deficyt 900" } });
+  assert.match(lastText(), /Deficyt: 0–800 kcal/);
+  assert.equal((await state.getNutCfg()).deficitKcal, 800);
+  await send({ message: { chat, date: now(), text: "/cel termin 2020-01-01" } });
+  assert.match(lastText(), /Termin celu: data w przyszłości/);
+  assert.equal((await state.getNutCfg()).goalDate, "2027-04-25");
+  await send({ message: { chat, date: now(), text: "/cel termin 2027-06-01" } });
+  assert.equal((await state.getNutCfg()).goalDate, "2027-06-01");
+  await send({ message: { chat, date: now(), text: "/cel termin 2027-04-25" } });
+  await send({ message: { chat, date: now(), text: "/waga 104" } });
+  const t = lastText();
+  assert.match(t, /Do celu \(95 kg\) zostało 9 kg/);
+  assert.match(t, /📍 Wg planu \(prosto do 2027-04-25\) dziś byłoby ok\. 104,8 kg: jesteś 0,8 kg do przodu/);
+  assert.match(t, /⏱ Żeby być na 95 kg 2027-04-25, trzeba ok\. 0,5 kg tygodniowo \(zostało 18,6 tyg\.\)/);
+  await send({ message: { chat, date: now(), text: "/cel deficyt 600\n/cel garmin 0,9" } });
+  assert.equal((await state.getNutCfg()).deficitKcal, 600);
+  assert.equal((await state.getNutCfg()).garminFactor, 0.9);
+  mock.timers.reset();
 });

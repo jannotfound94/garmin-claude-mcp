@@ -258,11 +258,14 @@ export class CoachState extends DurableObject<Env> {
    */
   private async nutOverrides(): Promise<Partial<NutritionConfig> & { cfgV?: number }> {
     const c = (await this.ctx.storage.get<Partial<NutritionConfig> & { cfgV?: number }>("nut:cfg")) ?? {};
-    if (c.cfgV !== 2) {
-      const { deficitKcal, ...rest } = c;
-      const migrated = { ...rest, ...(deficitKcal !== undefined && deficitKcal !== 400 ? { deficitKcal } : {}), cfgV: 2 };
-      await this.ctx.storage.put("nut:cfg", migrated);
-      return migrated;
+    if ((c.cfgV ?? 1) < 3) {
+      // v1 zapisywała całą konfigurację z wartościami domyślnymi z tamtej wersji: usuwamy te, które nigdy nie były świadomym wyborem.
+      const next: Partial<NutritionConfig> & { cfgV?: number } = { ...c, cfgV: 3 };
+      if (next.deficitKcal === 400) delete next.deficitKcal; // domyślna z v1
+      if (next.proteinPerKg === 1.8) delete next.proteinPerKg; // domyślna z v1/v2
+      if (next.fatPerKg === 1.0) delete next.fatPerKg;
+      await this.ctx.storage.put("nut:cfg", next);
+      return next;
     }
     return c;
   }
@@ -272,7 +275,7 @@ export class CoachState extends DurableObject<Env> {
   }
   async patchNutCfg(patch: Partial<NutritionConfig>): Promise<NutritionConfig> {
     const cur = await this.nutOverrides();
-    await this.ctx.storage.put("nut:cfg", { ...cur, ...patch, cfgV: 2 });
+    await this.ctx.storage.put("nut:cfg", { ...cur, ...patch, cfgV: 3 });
     return this.getNutCfg();
   }
 

@@ -288,7 +288,9 @@ export class MyMCP extends McpAgent<Env> {
       "setNutritionConfig",
       "Zmienia ustawienia dietetyka Jana, gdy sam o to poprosi lub gdy ustalicie cel (np. redukcja). Zmieniaj tylko to, co wynika z rozmowy. Deficyt dotyczy wyłącznie dni bez biegu i łatwych; w dni akcentów i długich biegów serwer go ignoruje.",
       {
-        deficitKcal: z.number().min(0).max(700).optional().describe("Dzienny deficyt kcal (0 = utrzymanie)"),
+        deficitKcal: z.number().min(0).max(800).optional().describe("Dzienny deficyt kcal w dni bez biegu i łatwe (0 = utrzymanie)"),
+        garminFactor: z.number().min(0.7).max(1.1).optional().describe("Korekta spalania z Garmina (np. 0,9 = zegarek zawyża o ok. 10%). Ignorowana, gdy cele liczone są z kalibracji wagi."),
+        goalDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable().optional().describe("Termin osiągnięcia wagi docelowej, YYYY-MM-DD (np. start maratonu), null = brak"),
         goalWeightKg: z.number().min(40).max(200).nullable().optional().describe("Waga docelowa (kg), null = brak celu"),
         macroWeightKg: z.number().min(40).max(200).nullable().optional().describe("Masa referencyjna (kg), od której liczone są gramy na kg (białko, tłuszcz, minimum węglowodanów). null = aktualna waga. Przy nadwadze ustaw bliżej docelowej, inaczej deficyt się nie mieści."),
         proteinPerKg: z.number().min(1.2).max(2.5).optional(),
@@ -312,7 +314,7 @@ export class MyMCP extends McpAgent<Env> {
           ...rest,
           ...(carbsPerKg ? { carbsPerKg: { ...cur.carbsPerKg, ...Object.fromEntries(Object.entries(carbsPerKg).filter(([, v]) => v !== undefined)) } } : {}),
         });
-        return text({ deficyt_kcal: next.deficitKcal, waga_docelowa_kg: next.goalWeightKg, masa_referencyjna_kg: next.macroWeightKg, bialko_g_na_kg: next.proteinPerKg, tluszcz_g_na_kg: next.fatPerKg, weglowodany_g_na_kg: next.carbsPerKg, przypomnienie_po_min: next.remindAfterMin });
+        return text({ deficyt_kcal: next.deficitKcal, waga_docelowa_kg: next.goalWeightKg, termin_celu: next.goalDate, korekta_garmina: next.garminFactor, masa_referencyjna_kg: next.macroWeightKg, bialko_g_na_kg: next.proteinPerKg, tluszcz_g_na_kg: next.fatPerKg, weglowodany_g_na_kg: next.carbsPerKg, przypomnienie_po_min: next.remindAfterMin });
       },
     );
 

@@ -39,7 +39,7 @@ import {
   weightStats,
 } from "./nutrition";
 import { coach, tg } from "./telegram";
-import { addDays, warsaw } from "./time";
+import { addDays, daysBetween, warsaw } from "./time";
 
 export function garminClient(env: Env): GarminPersonal | null {
   if (!env.GARMIN_PERSONAL_API_KEY) return null;
@@ -460,11 +460,19 @@ async function cmdWeight(env: Env, arg: string) {
   const today = warsaw().date;
   await st.addWeight({ date: today, kg: r1(kg) });
   const cfg = await st.getNutCfg();
-  const gp = goalProgress(await st.getWeights(), cfg.goalWeightKg, today);
+  const gp = goalProgress(await st.getWeights(), cfg.goalWeightKg, today, cfg.goalDate);
   const lines = [`⚖️ Mam: ${pl(r1(kg))} kg.`];
   if (cfg.goalWeightKg) {
     const left = r1(kg - cfg.goalWeightKg);
     lines.push(left > 0 ? `🎯 Do celu (${pl(cfg.goalWeightKg)} kg) zostało ${pl(left)} kg.` : `🎯 Cel ${pl(cfg.goalWeightKg)} kg zaliczony, jesteś ${pl(r1(-left))} kg poniżej. Respect!`);
+  }
+  if (gp.planKgToday !== null && gp.aheadKg !== null) {
+    lines.push(
+      `📍 Wg planu (prosto do ${cfg.goalDate}) dziś byłoby ok. ${pl(gp.planKgToday)} kg: ${gp.aheadKg > 0.2 ? `jesteś ${pl(gp.aheadKg)} kg do przodu 💪` : gp.aheadKg < -0.2 ? `brakuje ${pl(-gp.aheadKg)} kg do planu` : "idealnie wg planu"}.`,
+    );
+  }
+  if (gp.requiredKgPerWeek !== null && gp.weeksLeft) {
+    lines.push(`⏱ Żeby być na ${pl(cfg.goalWeightKg!)} kg ${cfg.goalDate}, trzeba ok. ${pl(gp.requiredKgPerWeek)} kg tygodniowo (zostało ${pl(gp.weeksLeft)} tyg.).${gp.requiredKgPerWeek > 0.75 ? " To już ostro przy treningu maratońskim, więc trzymamy rękę na pulsie." : ""}`);
   }
   if (gp.trendKgPerWeek !== null) {
     lines.push(`📉 Trend z ostatnich tygodni: ${gp.trendKgPerWeek > 0 ? "+" : ""}${pl(gp.trendKgPerWeek)} kg tygodniowo${gp.weeksToGoal ? `, w tym tempie cel za ok. ${gp.weeksToGoal} tyg.` : ""}.`);
@@ -525,8 +533,15 @@ async function cmdGoals(env: Env, arg: string) {
       if (x >= 0.6 && x <= 1.5) await st.patchNutCfg({ fatPerKg: x });
       else err = "Tłuszcz: 0,6–1,5 g/kg.";
     } else if (what === "deficyt") {
-      if (x >= 0 && x <= 700) await st.patchNutCfg({ deficitKcal: r0(x) });
-      else err = "Deficyt: 0–700 kcal (dotyczy tylko dni bez biegu i łatwych).";
+      if (x >= 0 && x <= 800) await st.patchNutCfg({ deficitKcal: r0(x) });
+      else err = "Deficyt: 0–800 kcal (dotyczy tylko dni bez biegu i łatwych).";
+    } else if (what === "garmin") {
+      if (x >= 0.7 && x <= 1.1) await st.patchNutCfg({ garminFactor: x });
+      else err = "Korekta Garmina: 0,7–1,1 (np. 0,9 = zegarek zawyża spalanie o ok. 10%, 1 = ufam zegarkowi).";
+    } else if (what === "termin") {
+      if (["off", "brak", "0"].includes(a ?? "")) await st.patchNutCfg({ goalDate: null });
+      else if (/^\d{4}-\d{2}-\d{2}$/.test(a ?? "") && !Number.isNaN(Date.parse(`${a}T12:00:00Z`)) && daysBetween(warsaw().date, a!) > 0) await st.patchNutCfg({ goalDate: a! });
+      else err = "Termin celu: data w przyszłości w formacie RRRR-MM-DD, np. /cel termin 2027-04-25 (albo „off”).";
     } else if (what === "cel") {
       if (["off", "0", "brak"].includes(a ?? "")) await st.patchNutCfg({ goalWeightKg: null });
       else if (x >= 40 && x <= 200) await st.patchNutCfg({ goalWeightKg: r1(x) });
@@ -542,7 +557,7 @@ async function cmdGoals(env: Env, arg: string) {
       const cur = await st.getNutCfg();
       await st.patchNutCfg({ carbsPerKg: { ...cur.carbsPerKg, [DAY_KEYS[a]]: v(b) } });
     } else {
-      err = "Użycie: /cel deficyt 600 · /cel cel 95 (waga docelowa) · /cel masa 95 · /cel bialko 1,8 · /cel tluszcz 1 · /cel wegle lekki 4,5 (wolny|lekki|akcent|dlugi) · /cel przypomnienie 180";
+      err = "Użycie: /cel deficyt 600 · /cel cel 95 (waga docelowa) · /cel termin 2027-04-25 · /cel garmin 0,9 · /cel masa 95 · /cel bialko 1,8 · /cel tluszcz 1 · /cel wegle lekki 4,5 (wolny|lekki|akcent|dlugi) · /cel przypomnienie 180";
     }
     if (err) {
       await say(env, `⚠️ ${err}`);
@@ -555,12 +570,17 @@ async function cmdGoals(env: Env, arg: string) {
   const lines = [
     `🎯 Cele · waga ${w ? `${pl(w)} kg` : "brak (/waga 82,5)"} · docelowa ${cfg.goalWeightKg ? `${pl(cfg.goalWeightKg)} kg` : "brak (/cel cel 95)"} · gramy na kg liczone od ${ref ? `${pl(ref)} kg` : "wagi"}`,
     `Białko ${pl(cfg.proteinPerKg)} g/kg · tłuszcz ${pl(cfg.fatPerKg)} g/kg · deficyt ${cfg.deficitKcal} kcal (tylko dni bez biegu i łatwe)`,
+    `Korekta Garmina ×${pl(cfg.garminFactor)} (zegarki zawyżają spalanie; zmiana: /cel garmin 0,9)`,
   ];
+  const gp = goalProgress(await st.getWeights(), cfg.goalWeightKg, warsaw().date, cfg.goalDate);
+  if (cfg.goalDate && gp.requiredKgPerWeek !== null && gp.weeksLeft) {
+    lines.push(`Termin ${cfg.goalDate}: zostało ${pl(gp.weeksLeft)} tyg., do celu potrzeba ok. ${pl(gp.requiredKgPerWeek)} kg tygodniowo (przy deficycie ${cfg.deficitKcal} realnie spodziewaj się ok. 0,3–0,45 kg)`);
+  }
   const base = await energyBase(env, warsaw().date).catch(() => null);
   lines.push(
     base
       ? base.detail
-        ? `Kcal od spokojnego dnia z Garmina: spoczynkowe ${base.detail.resting} + lekka aktywność ${r0(GARMIN_ACTIVE_HAIRCUT * base.detail.quietActive)} (aktywne ×0,85), plus ok. ${RUN_KCAL_PER_KG_KM} kcal/kg/km planowanego biegu. Gdy Garmin pokaże dziś więcej wysiłku, cel rośnie. Szczegóły: /spalanie`
+        ? `Kcal od spokojnego dnia z Garmina: (spoczynkowe ${base.detail.resting} + lekka aktywność ${r0(GARMIN_ACTIVE_HAIRCUT * base.detail.quietActive)}, aktywne ×0,85) ×${pl(cfg.garminFactor)} = ${r0(cfg.garminFactor * (base.detail.resting + GARMIN_ACTIVE_HAIRCUT * base.detail.quietActive))}, plus ok. ${pl(RUN_KCAL_PER_KG_KM)} kcal/kg/km planowanego biegu. Gdy Garmin pokaże dziś więcej wysiłku, cel rośnie. Szczegóły: /spalanie`
         : `Kcal z kalibracji (waga i spożycie): ok. ${base.kcal} kcal na przeciętny dzień`
       : "Kcal z g/kg (brak danych o spalaniu: Garmin lub ≥ 3 tygodnie zapisów i wagi)",
     "",
@@ -602,6 +622,7 @@ async function cmdReminders(env: Env, arg: string) {
 }
 
 async function cmdBurn(env: Env) {
+  const cfg = await coach(env).getNutCfg();
   const g = garminClient(env);
   if (!g) return void (await say(env, "Garmin Connect nie jest podłączony."));
   const today = warsaw().date;
@@ -617,7 +638,9 @@ async function cmdBurn(env: Env) {
   lines.push("");
   if (base?.detail) {
     const d = base.detail;
-    lines.push(`Spokojny dzień (baza celów): <b>${d.resting} + ${r0(GARMIN_ACTIVE_HAIRCUT * d.quietActive)} = ${r0(d.resting + GARMIN_ACTIVE_HAIRCUT * d.quietActive)}</b> kcal (spoczynkowe + aktywne ×0,85 z najspokojniejszych dni)`);
+    const quiet = d.resting + GARMIN_ACTIVE_HAIRCUT * d.quietActive;
+    lines.push(`Spokojny dzień wg Garmina: ${d.resting} + ${r0(GARMIN_ACTIVE_HAIRCUT * d.quietActive)} = ${r0(quiet)} kcal (spoczynkowe + aktywne ×0,85 z najspokojniejszych dni)`);
+    lines.push(`Po korekcie ×${pl(cfg.garminFactor)} (zegarek zawyża): <b>${r0(cfg.garminFactor * quiet)}</b> kcal, to baza celów`);
     lines.push(`Mediana wszystkich dni: ${base.kcal} kcal, najbardziej aktywny: ${r0(perDay[perDay.length - 1])} kcal`);
     lines.push("Do tego cel dolicza bieg z planu, a gdy Garmin pokaże dziś więcej wysiłku, rośnie do faktycznego spalania.");
   } else if (base) lines.push(`Baza do celów: <b>${base.kcal}</b> kcal (${base.source === "kalibracja" ? "z kalibracji wagi i spożycia" : "Garmin"})`);
@@ -887,7 +910,7 @@ export async function nutritionReport(env: Env, days: number) {
     srednia_7_dni_zalogowane: { dni_w_probce: last7.length, kcal: avg((d) => mealsOf(d.date).kcal), bialko_g: avg((d) => mealsOf(d.date).protein), weglowodany_g: avg((d) => mealsOf(d.date).carbs), tluszcz_g: avg((d) => mealsOf(d.date).fat) },
     waga: (() => {
       const s = weightStats(weights, today);
-      const gp = goalProgress(weights, cfg.goalWeightKg, today);
+      const gp = goalProgress(weights, cfg.goalWeightKg, today, cfg.goalDate);
       return {
         ostatnia: s.last,
         dni_od_ostatniego_wazenia: gp.daysSinceWeighIn,
@@ -895,13 +918,18 @@ export async function nutritionReport(env: Env, days: number) {
         do_celu_kg: gp.toGoKg,
         tempo_kg_na_tydzien: gp.trendKgPerWeek,
         prognoza_tygodni_do_celu: gp.weeksToGoal,
+        termin_celu: cfg.goalDate,
+        tygodni_do_terminu: gp.weeksLeft,
+        plan_kg_dzis: gp.planKgToday,
+        przed_planem_kg: gp.aheadKg,
+        wymagane_tempo_kg_na_tydzien: gp.requiredKgPerWeek,
         srednia_7_dni: s.avg7,
         zmiana_tydzien_do_tygodnia_kg: s.deltaWeek,
         pomiary_28_dni: s.count28,
       };
     })(),
     kalibracja_zapotrzebowania: estimateTdee(intake, weights, today),
-    garmin_uwagi: energyError ?? "Spalone = spoczynkowe + aktywne. Kalorie aktywne Garmina bywają zawyżone o 10–30%. Dzisiejsza wartość jest cząstkowa do końca dnia.",
-    ustawienia: { deficyt_kcal: cfg.deficitKcal, waga_docelowa_kg: cfg.goalWeightKg, masa_referencyjna_kg: cfg.macroWeightKg, bialko_g_na_kg: cfg.proteinPerKg, tluszcz_g_na_kg: cfg.fatPerKg, weglowodany_g_na_kg: cfg.carbsPerKg, przypomnienia: cfg.remindersOn, plan_posilkow_pn_pt: cfg.slots, plan_posilkow_weekend: cfg.weekendSlots },
+    garmin_uwagi: energyError ?? `Spalone = spoczynkowe + aktywne. Garmin zawyża spalanie (aktywne o 10–30%), więc cele liczone są z korektą ×${cfg.garminFactor} (ustawienia.korekta_garmina), a kolumny garmin_* w dniach to surowe dane zegarka. Dzisiejsza wartość jest cząstkowa do końca dnia.`,
+    ustawienia: { deficyt_kcal: cfg.deficitKcal, waga_docelowa_kg: cfg.goalWeightKg, termin_celu: cfg.goalDate, korekta_garmina: cfg.garminFactor, masa_referencyjna_kg: cfg.macroWeightKg, bialko_g_na_kg: cfg.proteinPerKg, tluszcz_g_na_kg: cfg.fatPerKg, weglowodany_g_na_kg: cfg.carbsPerKg, przypomnienia: cfg.remindersOn, plan_posilkow_pn_pt: cfg.slots, plan_posilkow_weekend: cfg.weekendSlots },
   };
 }
