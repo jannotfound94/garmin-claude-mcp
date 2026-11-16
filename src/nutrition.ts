@@ -85,6 +85,8 @@ export interface NutritionConfig {
   goalWeightKg: number | null;
   /** Którędy trafiają do Janka wiadomości trenera i przypomnienia: aplikacja (push), Telegram albo oba. */
   notifyChannel: NotifyChannel;
+  /** Długość postu przerywanego w godzinach (16 = 16:8). Okno jedzenia to reszta doby. */
+  fastHours: number;
   /** Do kiedy ma być waga docelowa (YYYY-MM-DD), np. start maratonu. Null = bez terminu. */
   goalDate: string | null;
   /**
@@ -106,6 +108,7 @@ export const DEFAULT_CONFIG: NutritionConfig = {
   deficitKcal: 600, // Janek redukuje masę ciała 107 -> 95 kg (patrz TRENER.md); /cel deficyt 0 wyłącza
   macroWeightKg: null,
   goalWeightKg: 95,
+  fastHours: 16,
   notifyChannel: "both", // do czasu włączenia powiadomień w aplikacji działa tak, jak dotąd: Telegram
   goalDate: "2027-04-25", // start Energa Gdańsk Maraton
   garminFactor: 0.9,

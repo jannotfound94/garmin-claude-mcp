@@ -233,3 +233,13 @@ hr { border: 0; border-top: 1px solid var(--line); width: 100%; margin: 2px 0; }
 
 .pts { margin: 8px 0 6px; padding-left: 22px; display: grid; gap: 4px; }
 .small.warn { color: var(--warn); }
+
+/* post przerywany */
+.fastrow { display: flex; align-items: center; gap: 14px; }
+.fastinfo { display: grid; gap: 6px; min-width: 0; }
+.linkbtn { background: none; border: 0; padding: 8px 0 2px; color: var(--blue2); font-size: 13px; text-align: center; width: 100%; cursor: pointer; text-decoration: underline; text-underline-offset: 3px; }
+.faststats { margin-top: 12px; display: grid; gap: 8px; }
+.fbars { display: flex; align-items: flex-end; gap: 6px; height: 44px; }
+.fbar { flex: 1; border-radius: 5px; background: #2a4f8f; min-height: 4px; }
+.fbar.ok { background: var(--good); }
+.fastcard .btn { margin-top: 10px; }

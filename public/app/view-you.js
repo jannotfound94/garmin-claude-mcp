@@ -188,6 +188,7 @@ function settings(body) {
       proteinPerKg: h("input", { type: "number", step: "0.1", inputmode: "decimal", value: s.proteinPerKg }),
       fatPerKg: h("input", { type: "number", step: "0.1", inputmode: "decimal", value: s.fatPerKg }),
       remindAfterMin: h("input", { type: "number", inputmode: "numeric", value: s.remindAfterMin }),
+      fastHours: h("input", { type: "number", inputmode: "numeric", min: 10, max: 22, value: s.fastHours }),
       slotsText: h("input", { type: "text", value: s.slotsText, placeholder: "śniadanie 07:30; obiad 13:30; kolacja 19:30" }),
       weekendSlotsText: h("input", { type: "text", value: s.weekendSlotsText, placeholder: "puste = jak w tygodniu" }),
     };
@@ -199,7 +200,7 @@ function settings(body) {
       const num = (el) => (el.value === "" ? null : Number(el.value));
       save.disabled = true;
       try {
-        await api("/settings", { method: "PATCH", body: { deficitKcal: num(f.deficitKcal), garminFactor: num(f.garminFactor), goalWeightKg: num(f.goalWeightKg), goalDate: f.goalDate.value || null, macroWeightKg: num(f.macroWeightKg), proteinPerKg: num(f.proteinPerKg), fatPerKg: num(f.fatPerKg), remindAfterMin: num(f.remindAfterMin), remindersOn: remind.checked, notifyChannel: channel.value, slotsText: f.slotsText.value, weekendSlotsText: f.weekendSlotsText.value } });
+        await api("/settings", { method: "PATCH", body: { deficitKcal: num(f.deficitKcal), garminFactor: num(f.garminFactor), goalWeightKg: num(f.goalWeightKg), goalDate: f.goalDate.value || null, macroWeightKg: num(f.macroWeightKg), proteinPerKg: num(f.proteinPerKg), fatPerKg: num(f.fatPerKg), remindAfterMin: num(f.remindAfterMin), fastHours: num(f.fastHours), remindersOn: remind.checked, notifyChannel: channel.value, slotsText: f.slotsText.value, weekendSlotsText: f.weekendSlotsText.value } });
         toast("Zapisano ustawienia ✅");
         rerender();
       } catch (e) {
@@ -215,6 +216,7 @@ function settings(body) {
           h("div", { class: "two" }, field("Waga docelowa (kg)", f.goalWeightKg), field("Termin celu", f.goalDate)),
           h("div", { class: "two" }, field("Masa referencyjna (kg)", f.macroWeightKg, "puste = niższa z wagi i celu"), field("Białko (g/kg)", f.proteinPerKg)),
           h("div", { class: "two" }, field("Tłuszcz (g/kg)", f.fatPerKg), field("Przypomnienie po (min)", f.remindAfterMin)),
+          field("Post przerywany (godziny postu)", f.fastHours, "16 = 16:8, okno jedzenia to reszta doby"),
           field("Pory posiłków (pn–pt)", f.slotsText, "nazwa GG:MM, rozdzielone średnikiem"),
           field("Pory posiłków (weekend)", f.weekendSlotsText),
           field("Gdzie wysyłać wiadomości trenera i przypomnienia", channel, "„Tylko aplikacja” wybierz dopiero po udanym teście powiadomień poniżej"),

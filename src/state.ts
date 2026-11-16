@@ -3,6 +3,7 @@ import { fmtWarsaw } from "./time";
 import type { GarminToken } from "./garmin";
 import type { LatLon, RouteProposal } from "./routes";
 import { type PushSub, type VapidKeys, generateVapid } from "./push";
+import { type FastRecord, type FastState, HOUR, advance, clampHours, finishEating, startEating, transitionMessage } from "./fasting";
 import { DEFAULT_CONFIG, type DietJob, type Meal, type NutritionConfig, type Weight, dateOfMealId } from "./nutrition";
 
 export interface Favorite {
@@ -173,6 +174,7 @@ export class CoachState extends DurableObject<Env> {
 
   async alarm() {
     await this.runDietJobs().catch((e) => console.error("diet jobs", e));
+    await this.fastTick(true).catch((e) => console.error("fast tick", e));
     const m = await this.load();
     if (m.pending.length) {
       const reasons = m.pending;
@@ -237,6 +239,63 @@ export class CoachState extends DurableObject<Env> {
   private async rescheduleDietJobs() {
     const rest = await this.dietJobs();
     if (rest.length) await this.ensureAlarmAt(Math.min(...rest.map((j) => j.nextAt)));
+  }
+
+  // ---------- post przerywany ----------
+  // Stan i historia leżą tu, a budzik Durable Object odpala powiadomienie dokładnie w chwili końca fazy (cron co 15 minut
+  // jest tylko zabezpieczeniem). Zapis stanu poprzedza wysyłkę, więc powiadomienie nie zdubluje się przy ponownym wywołaniu.
+
+  async getFast(): Promise<FastState | null> {
+    return (await this.ctx.storage.get<FastState>("fast:state")) ?? null;
+  }
+  async getFastHistory(): Promise<FastRecord[]> {
+    return (await this.ctx.storage.get<FastRecord[]>("fast:hist")) ?? [];
+  }
+  private async saveFast(state: FastState, records: FastRecord[] = []) {
+    await this.ctx.storage.put("fast:state", state);
+    if (records.length) await this.ctx.storage.put("fast:hist", [...(await this.getFastHistory()), ...records].slice(-200));
+    await this.ensureAlarmAt(state.end + 1000);
+  }
+
+  /** Nadrabia przejścia między fazami do teraz. notify=false (otwarcie aplikacji): bez powiadomień, tylko stan. */
+  async fastTick(notify = true): Promise<FastState | null> {
+    const cur = await this.getFast();
+    if (!cur) return null;
+    const cfg = await this.getNutCfg();
+    const now = Date.now();
+    const { state, transitions, finished } = advance(cur, now, clampHours(cfg.fastHours));
+    if (state === cur) {
+      await this.ensureAlarmAt(cur.end + 1000);
+      return cur;
+    }
+    await this.saveFast(state, finished);
+    const last = transitions[transitions.length - 1];
+    if (notify && last && now - last.at < 3 * HOUR) {
+      const selfEnv = { ...this.env, COACH_STATE: { get: () => this, idFromName: () => "self" } } as unknown as Env;
+      const { notifySystem } = await import("./notify");
+      const { warsaw } = await import("./time");
+      const msg = transitionMessage(last, state, warsaw(new Date(state.end)).time);
+      await notifySystem(selfEnv, { ...msg, url: "/app/#/dzis", tag: "fast", kind: "fast" }).catch((e) => console.error("fast notify", e));
+    }
+    return state;
+  }
+
+  async fastFinishEating(atMs?: number, restart = false): Promise<FastState> {
+    const cfg = await this.getNutCfg();
+    await this.fastTick(false);
+    const now = Date.now();
+    const { state, changed } = finishEating(await this.getFast(), now, clampHours(cfg.fastHours), atMs, restart);
+    if (changed) await this.saveFast(state);
+    // Jeśli "skończyłem jeść" było dawno temu, post mógł już się skończyć: nadrabiamy bez powiadomienia.
+    return (await this.fastTick(false)) ?? state;
+  }
+
+  async fastStartEating(): Promise<FastState> {
+    const cfg = await this.getNutCfg();
+    await this.fastTick(false);
+    const { state, record, changed } = startEating(await this.getFast(), Date.now(), clampHours(cfg.fastHours));
+    if (changed) await this.saveFast(state, record ? [record] : []);
+    return state;
   }
 
   // ---------- Garmin Personal API bearer token cache ----------

@@ -1,6 +1,6 @@
 // Service worker: powłoka aplikacji działa offline, dane (/api) zawsze z sieci.
-const CACHE = "garda-app-v2";
-const SHELL = ["./", "style.css", "app.js", "api.js", "charts.js", "icons.js", "ui.js", "meals.js", "view-today.js", "view-food.js", "view-plan.js", "view-you.js", "push.js", "icon.svg", "icon-192.png", "icon-512.png", "manifest.webmanifest"];
+const CACHE = "garda-app-v3";
+const SHELL = ["./", "style.css", "app.js", "api.js", "charts.js", "icons.js", "ui.js", "meals.js", "view-today.js", "view-food.js", "view-plan.js", "view-you.js", "push.js", "fasting.js", "icon.svg", "icon-192.png", "icon-512.png", "manifest.webmanifest"];
 
 self.addEventListener("install", (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting()));

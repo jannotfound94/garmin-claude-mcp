@@ -14,6 +14,7 @@ import { currentLocation, weatherLocation } from "./loc";
 import { fetchForecast } from "./weather";
 import { geocode, mapPage, proposeLoops, toGpx } from "./routes";
 import { buildTextRoutes } from "./textroute";
+import { fastStats } from "./fasting";
 import { loadAnchors, warmAnchors } from "./anchors";
 import { hasTelegram, notifyCoach } from "./notify";
 import { coach, handleTelegramWebhook, sendTelegram, sendTelegramFile, tg, webhookSecret } from "./telegram";
@@ -398,6 +399,15 @@ export class MyMCP extends McpAgent<Env> {
             const cfg = await coach(this.env).getNutCfg();
             return { kanal: cfg.notifyChannel, urzadzenia_z_powiadomieniami: (await coach(this.env).getPushSubs()).length, telegram: hasTelegram(this.env) };
           })(),
+          post_przerywany: await (async () => {
+            const stt = coach(this.env);
+            const fs = await stt.fastTick(false);
+            const stats = fastStats(await stt.getFastHistory());
+            const hm = (ms: number) => fmtWarsaw(new Date(ms).toISOString());
+            return fs
+              ? { faza: fs.phase === "fast" ? "post (nie je)" : "okno jedzenia", od: hm(fs.start), do: hm(fs.end), cel_postu_godz: fs.goalHours, ostatni_post_godz: stats.lastHours, srednia_7_postow_godz: stats.avg7Hours, seria_osiagnietych: stats.streak }
+              : { faza: "nie liczony (Janek jeszcze nie uruchomił zegara)" };
+          })(),
           dietetyk_wlaczony: Boolean(this.env.GEMINI_API_KEY),
           trasy: await (async () => {
             const { home, last } = await coach(this.env).getRouteSettings();
@@ -738,6 +748,6 @@ export default {
   fetch: (request: Request, env: Env, ctx: ExecutionContext) => provider.fetch(request, env, ctx),
   async scheduled(_controller: ScheduledController, env: Env, ctx: ExecutionContext) {
     // The park data for the current start point is fetched here, where nobody is waiting for it.
-    ctx.waitUntil(Promise.all([runScheduler(env), warmAnchors(env).catch((e) => console.error("warmAnchors", e))]));
+    ctx.waitUntil(Promise.all([runScheduler(env), warmAnchors(env).catch((e) => console.error("warmAnchors", e)), coach(env).fastTick(true).catch((e) => console.error("fastTick", e))]));
   },
 } satisfies ExportedHandler<Env>;
