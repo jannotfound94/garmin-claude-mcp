@@ -1,5 +1,6 @@
 // Widok "Ty": profil z zakładkami Postęp, Aktywności, Trener i Ustawienia.
 import { api, auth } from "./api.js";
+import { disablePush, enablePush, pushState, pushSupported, sendTest, shareLocation } from "./push.js";
 import { ring, weekChart, weightChart } from "./charts.js";
 import { header } from "./view-today.js";
 import { WD, aheadLabel, badge, card, chip, dateObj, empty, errMsg, getSummary, h, icon, iconButton, loading, n0, n1, pace, rerender, stat, todayLocal, toast } from "./ui.js";
@@ -191,13 +192,14 @@ function settings(body) {
       weekendSlotsText: h("input", { type: "text", value: s.weekendSlotsText, placeholder: "puste = jak w tygodniu" }),
     };
     const remind = h("input", { type: "checkbox", checked: s.remindersOn });
+    const channel = h("select", { "aria-label": "Kanał powiadomień" }, [["both", "Aplikacja i Telegram"], ["app", "Tylko aplikacja"], ["telegram", "Tylko Telegram"]].map(([v, t]) => h("option", { value: v, ...(v === s.notifyChannel ? { selected: true } : {}) }, t)));
     const save = h("button", { class: "btn block" }, "Zapisz ustawienia");
     const field = (label, el, hint) => h("label", { class: "field" }, label, el, hint ? h("span", { class: "small" }, hint) : null);
     save.addEventListener("click", async () => {
       const num = (el) => (el.value === "" ? null : Number(el.value));
       save.disabled = true;
       try {
-        await api("/settings", { method: "PATCH", body: { deficitKcal: num(f.deficitKcal), garminFactor: num(f.garminFactor), goalWeightKg: num(f.goalWeightKg), goalDate: f.goalDate.value || null, macroWeightKg: num(f.macroWeightKg), proteinPerKg: num(f.proteinPerKg), fatPerKg: num(f.fatPerKg), remindAfterMin: num(f.remindAfterMin), remindersOn: remind.checked, slotsText: f.slotsText.value, weekendSlotsText: f.weekendSlotsText.value } });
+        await api("/settings", { method: "PATCH", body: { deficitKcal: num(f.deficitKcal), garminFactor: num(f.garminFactor), goalWeightKg: num(f.goalWeightKg), goalDate: f.goalDate.value || null, macroWeightKg: num(f.macroWeightKg), proteinPerKg: num(f.proteinPerKg), fatPerKg: num(f.fatPerKg), remindAfterMin: num(f.remindAfterMin), remindersOn: remind.checked, notifyChannel: channel.value, slotsText: f.slotsText.value, weekendSlotsText: f.weekendSlotsText.value } });
         toast("Zapisano ustawienia ✅");
         rerender();
       } catch (e) {
@@ -215,11 +217,62 @@ function settings(body) {
           h("div", { class: "two" }, field("Tłuszcz (g/kg)", f.fatPerKg), field("Przypomnienie po (min)", f.remindAfterMin)),
           field("Pory posiłków (pn–pt)", f.slotsText, "nazwa GG:MM, rozdzielone średnikiem"),
           field("Pory posiłków (weekend)", f.weekendSlotsText),
-          h("label", { class: "check" }, remind, "Przypomnienia o posiłkach (Telegram)"),
+          field("Gdzie wysyłać wiadomości trenera i przypomnienia", channel, "„Tylko aplikacja” wybierz dopiero po udanym teście powiadomień poniżej"),
+          h("label", { class: "check" }, remind, "Przypomnienia o posiłkach"),
           save,
         ),
       ),
+      pushCard(),
       card({ icon: "user", tone: "orange", title: "Konto" }, h("button", { class: "btn danger", onclick: () => { auth.clear(); rerender(); } }, icon("logout", 17), "Wyloguj"), h("div", { class: "small muted" }, "Garda v2 · kalorie liczy serwer, zdjęcia rozpoznaje Gemini, plan układa trener (Claude).")),
     );
   }).catch((e) => body.replaceChildren(h("div", { class: "card" }, `⚠️ ${errMsg(e)}`)));
+}
+
+// ---------------- Powiadomienia na tym urządzeniu ----------------
+
+function pushCard() {
+  const status = h("div", { class: "small muted" }, "Sprawdzam…");
+  const btns = h("div", { class: "btns" });
+  const loc = h("button", { class: "btn ghost" }, icon("pin", 17), "Użyj mojej lokalizacji");
+  loc.addEventListener("click", async () => {
+    loc.disabled = true;
+    try {
+      const r = await shareLocation();
+      toast(r.location ? `Zapisano lokalizację${r.location.odDomuKm != null ? ` (${n1(r.location.odDomuKm)} km od domu)` : ""} ✅` : "Zapisano lokalizację ✅");
+    } catch (e) {
+      toast(e.message || "Błąd lokalizacji.", "error", 6000);
+    }
+    loc.disabled = false;
+  });
+  const draw = async () => {
+    const st = await pushState();
+    const act = (label, ic, fn, cls = "btn") => {
+      const b = h("button", { class: cls }, icon(ic, 17), label);
+      b.addEventListener("click", async () => {
+        b.disabled = true;
+        try {
+          await fn();
+        } catch (e) {
+          toast(e.message || "Coś poszło nie tak.", "error", 7000);
+        }
+        draw();
+      });
+      return b;
+    };
+    if (st === "unsupported") {
+      status.textContent = "Ta przeglądarka nie obsługuje powiadomień. Otwórz Garda w Chrome i zainstaluj ją (menu ⋮ → Zainstaluj aplikację).";
+      btns.replaceChildren();
+    } else if (st === "denied") {
+      status.textContent = "Powiadomienia są zablokowane. Odblokuj je w ustawieniach witryny w przeglądarce (ikona kłódki przy adresie → Powiadomienia).";
+      btns.replaceChildren();
+    } else if (st === "on") {
+      status.textContent = "Powiadomienia włączone na tym urządzeniu. Dostaniesz wiadomości trenera i przypomnienia o posiłkach z przyciskami „Dodam / Pominąłem / Za godzinę”.";
+      btns.replaceChildren(act("Wyślij test", "bell", async () => { await sendTest(); toast("Wysłano. Powinno pojawić się za chwilę."); }), act("Wyłącz", "close", async () => { await disablePush(); toast("Wyłączono powiadomienia na tym urządzeniu."); }, "btn ghost"));
+    } else {
+      status.textContent = "Wyłączone. Włącz, aby dostawać wiadomości trenera i przypomnienia o posiłkach w telefonie. Najlepiej w aplikacji zainstalowanej z Chrome.";
+      btns.replaceChildren(act("Włącz powiadomienia", "bell", async () => { await enablePush(); toast("Włączone ✅ Wyślij teraz test."); }));
+    }
+  };
+  draw();
+  return card({ icon: "bell", tone: "blue", title: "Powiadomienia i lokalizacja" }, status, btns, h("div", { class: "small muted" }, "Lokalizacja służy do pogody i tras z miejsca, w którym jesteś (zamiast udostępniania jej w Telegramie)."), h("div", { class: "btns" }, loc));
 }

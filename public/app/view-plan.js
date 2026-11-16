@@ -1,5 +1,6 @@
 // Widok "Plan": treningi z kalendarza z pogodą i trasami, prośba o plan do trenera, kilometry z ostatnich dni.
 import { api } from "./api.js";
+import { shareLocation } from "./push.js";
 import { areaChart } from "./charts.js";
 import { header } from "./view-today.js";
 import { WD, addDays, card, chip, dateObj, errMsg, h, icon, iconButton, loading, n0, n1, pace, pills, rerender, toast, todayLocal, weatherChips } from "./ui.js";
@@ -61,6 +62,7 @@ export async function viewPlan(root) {
     header("Plan treningowy", `Ostatnie 7 dni: ${n1(d.runKmLast7)} km · 14 dni: ${n1(d.runKmLast14)} km`, iconButton("refresh", "Odśwież", rerender)),
     card({ icon: "sparkles", tone: "orange", title: "Nowy plan od trenera" }, h("div", { class: "small muted" }, "Trener (Claude) ułoży plan wg ustalonych zasad (cel maratonu, regeneracja, pogoda) i wpisze go do kalendarza. Odpowiedź zobaczysz w Ty → Trener."), weeks, note, ask),
     card({ icon: "run", tone: "orange", title: "Kilometry", range: "ostatnie 14 dni" }, areaChart({ points: km, color: "orange", unit: "km", xLabels: [{ i: 0, text: `${dateObj(addDays(today, -13)).getUTCDate()}.${String(dateObj(addDays(today, -13)).getUTCMonth() + 1).padStart(2, "0")}` }, { i: 13, text: "dziś" }], label: "Kilometry z ostatnich 14 dni" })),
+    h("button", { class: "btn ghost block", onclick: async (ev) => { const b = ev.currentTarget; b.disabled = true; try { const r = await shareLocation(); toast(r.location ? `Zapisano lokalizację${r.location.odDomuKm != null ? ` (${n1(r.location.odDomuKm)} km od domu)` : ""} ✅` : "Zapisano lokalizację ✅"); rerender(); } catch (e) { toast(e.message || "Błąd lokalizacji.", "error", 6000); b.disabled = false; } } }, icon("pin", 17), "Użyj mojej lokalizacji (pogoda i trasy stąd)"),
     pillHost,
     list,
     d.recent.length

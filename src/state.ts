@@ -2,6 +2,7 @@ import { DurableObject } from "cloudflare:workers";
 import { fmtWarsaw } from "./time";
 import type { GarminToken } from "./garmin";
 import type { LatLon, RouteProposal } from "./routes";
+import { type PushSub, type VapidKeys, generateVapid } from "./push";
 import { DEFAULT_CONFIG, type DietJob, type Meal, type NutritionConfig, type Weight, dateOfMealId } from "./nutrition";
 
 export interface Favorite {
@@ -419,6 +420,36 @@ export class CoachState extends DurableObject<Env> {
     if (seen.includes(id)) return false;
     seen.push(id);
     await this.ctx.storage.put(key, seen.slice(-60));
+    return true;
+  }
+
+  // ---------- powiadomienia push (klucze VAPID i subskrypcje urządzeń) ----------
+
+  /** Klucze VAPID powstają przy pierwszym użyciu i zostają w tym obiekcie: klucz prywatny nigdy nie opuszcza serwera. */
+  async getVapid(): Promise<VapidKeys> {
+    const cur = await this.ctx.storage.get<VapidKeys>("push:vapid");
+    if (cur) return cur;
+    return this.ctx.blockConcurrencyWhile(async () => {
+      const again = await this.ctx.storage.get<VapidKeys>("push:vapid");
+      if (again) return again;
+      const keys = await generateVapid();
+      await this.ctx.storage.put("push:vapid", keys);
+      return keys;
+    });
+  }
+  async getPushSubs(): Promise<PushSub[]> {
+    return (await this.ctx.storage.get<PushSub[]>("push:subs")) ?? [];
+  }
+  async addPushSub(sub: PushSub) {
+    const list = (await this.getPushSubs()).filter((s) => s.endpoint !== sub.endpoint);
+    list.push(sub);
+    await this.ctx.storage.put("push:subs", list.slice(-8));
+  }
+  async removePushSub(endpoint: string): Promise<boolean> {
+    const list = await this.getPushSubs();
+    const next = list.filter((s) => s.endpoint !== endpoint);
+    if (next.length === list.length) return false;
+    await this.ctx.storage.put("push:subs", next);
     return true;
   }
 

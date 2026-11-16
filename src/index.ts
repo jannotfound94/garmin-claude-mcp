@@ -14,6 +14,7 @@ import { currentLocation, weatherLocation } from "./loc";
 import { fetchForecast } from "./weather";
 import { geocode, mapPage, proposeLoops, toGpx } from "./routes";
 import { loadAnchors, warmAnchors } from "./anchors";
+import { hasTelegram, notifyCoach } from "./notify";
 import { coach, handleTelegramWebhook, sendTelegram, sendTelegramFile, tg, webhookSecret } from "./telegram";
 import { addDays, daysBetween, fmtWarsaw, warsaw, warsawToUtc } from "./time";
 
@@ -255,15 +256,20 @@ export class MyMCP extends McpAgent<Env> {
         if (!o) return text(`Brak trasy ${option}. Dostępne: ${p.options.map((x) => x.label).join(", ")}`);
         const date = warsaw().date;
         const name = `Trasa ${o.label} ${o.distance_km} km (${date})`;
-        await sendTelegramFile(
-          this.env,
-          `trasa-${date}-${o.label}.gpx`,
-          toGpx(name, o.coords),
-          `${name}. Stuknij plik i otwórz w Locus Map, albo zaimportuj jako kurs w Garmin Connect.`,
-        );
+        // GPX idzie na Telegram, jeśli jest podłączony; w aplikacji ta sama trasa jest dostępna jako mapa i plik GPX (zakładka Plan).
+        let gpxOnTelegram = false;
+        if (hasTelegram(this.env)) {
+          await sendTelegramFile(
+            this.env,
+            `trasa-${date}-${o.label}.gpx`,
+            toGpx(name, o.coords),
+            `${name}. Stuknij plik i otwórz w Locus Map, albo zaimportuj jako kurs w Garmin Connect.`,
+          ).then(() => (gpxOnTelegram = true), (e) => console.error("chooseRoute telegram", e));
+        }
         await state.markChosen(proposalId, o.label);
         const { origin } = await state.getRouteSettings();
-        return text({ wyslano_gpx: true, trasa: o.label, dystans_km: o.distance_km, mapa: `${origin ?? ""}/trasa/${proposalId}/${o.label}` });
+        const base = origin ?? "";
+        return text({ wyslano_gpx_na_telegram: gpxOnTelegram, trasa: o.label, dystans_km: o.distance_km, mapa: `${base}/trasa/${proposalId}/${o.label}`, gpx: `${base}/trasa/${proposalId}/${o.label}.gpx` });
       },
     );
 
@@ -374,7 +380,11 @@ export class MyMCP extends McpAgent<Env> {
               ...(l.kind === "udostepniona" ? { od_domu_km: l.od_domu_km, udostepniona_godz_temu: l.udostepniona_godz_temu } : {}),
             };
           })(),
-          telegram_skonfigurowany: Boolean(this.env.TELEGRAM_BOT_TOKEN && this.env.TELEGRAM_CHAT_ID),
+          telegram_skonfigurowany: hasTelegram(this.env),
+          powiadomienia: await (async () => {
+            const cfg = await coach(this.env).getNutCfg();
+            return { kanal: cfg.notifyChannel, urzadzenia_z_powiadomieniami: (await coach(this.env).getPushSubs()).length, telegram: hasTelegram(this.env) };
+          })(),
           dietetyk_wlaczony: Boolean(this.env.GEMINI_API_KEY),
           trasy: await (async () => {
             const { home, last } = await coach(this.env).getRouteSettings();
@@ -395,12 +405,12 @@ export class MyMCP extends McpAgent<Env> {
 
     this.server.tool(
       "sendMessage",
-      "Send a Telegram message to Jan (plain text, Polish). The message is saved in the conversation history. Under the input field Jan always has a button '📍 Jestem gdzie indziej' that shares his location with one tap, so you can point to it.",
+      "Send a message to Jan (plain text, Polish). It is always saved in the conversation (visible in the Garda app, tab Ty → Trener) and delivered as a push notification in the app and/or on Telegram, depending on his notification setting; if the chosen channel fails, the other one is used. In the app he can share his location with the 'Użyj mojej lokalizacji' button (Plan tab, routes); on Telegram with the '📍 Jestem gdzie indziej' button.",
       { text: z.string().min(1) },
       async ({ text: msg }) => {
-        await sendTelegram(this.env, msg);
-        await coach(this.env).logOutgoing(msg);
-        return text("Wysłano.");
+        const d = await notifyCoach(this.env, msg);
+        if (d.channelUsed === "none") return text({ zapisano_w_rozmowie: true, powiadomienie_dostarczone: false, uwaga: "Brak działającego kanału powiadomień (aplikacja bez włączonych powiadomień i Telegram niepodłączony). Wiadomość czeka w rozmowie w aplikacji." });
+        return text({ zapisano_w_rozmowie: true, powiadomienie_dostarczone: true, kanal: d.channelUsed, ...(d.fallback ? { uwaga: "Wybrany kanał zawiódł, użyto zapasowego." } : {}) });
       },
     );
 

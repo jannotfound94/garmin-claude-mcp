@@ -3,6 +3,8 @@
 // Znaczniki to stałe, własne ciągi (nie dane użytkownika), więc użycie innerHTML jest bezpieczne.
 const P = {
   // nawigacja
+  bell: '<path d="M6 16.5V11a6 6 0 0 1 12 0v5.5l1.5 1.5h-15z"/><path d="M10 20.5a2 2 0 0 0 4 0"/>',
+  pin: '<path d="M12 21s6.5-5.6 6.5-11A6.5 6.5 0 0 0 5.5 10C5.5 15.4 12 21 12 21z"/><circle cx="12" cy="10" r="2.4"/>',
   home: '<path d="M4 11.2 12 4.5l8 6.7"/><path d="M6 10v9.5h12V10"/><path d="M10 19.5v-5h4v5"/>',
   meal: '<path d="M6.5 3.5v5.2a2.5 2.5 0 0 0 5 0V3.5"/><path d="M9 3.5v17"/><path d="M16.5 20.5V3.5c-2 1.4-3 3.8-3 6.5v3.5h3"/>',
   plus: '<path d="M12 5v14M5 12h14"/>',

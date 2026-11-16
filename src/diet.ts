@@ -39,6 +39,7 @@ import {
   sumMacros,
   weightStats,
 } from "./nutrition";
+import { deliver, hasTelegram, pushToAll, reminderToken } from "./notify";
 import { coach, tg } from "./telegram";
 import { addDays, daysBetween, warsaw } from "./time";
 
@@ -938,10 +939,11 @@ export async function handleCallback(env: Env, cq: any): Promise<void> {
 // ---------------- przypomnienia (wołane co 15 min ze schedulera) ----------------
 
 export async function runDietReminders(env: Env): Promise<void> {
-  if (!env.TELEGRAM_BOT_TOKEN || !env.TELEGRAM_CHAT_ID) return;
   const st = coach(env);
   const cfg = await st.getNutCfg();
   if (!cfg.remindersOn || !(cfg.slots.length || cfg.weekendSlots.length)) return;
+  // Przypomnienia idą kanałem wg ustawienia (aplikacja i/lub Telegram); bez żadnego dostępnego kanału nie ma do kogo pisać.
+  if (!hasTelegram(env) && !(await st.getPushSubs()).length) return;
   const now = new Date();
   const local = warsaw(now);
   const [meals, state] = await Promise.all([st.getMeals(local.date), st.getReminders()]);
@@ -969,11 +971,36 @@ export async function runDietReminders(env: Env): Promise<void> {
       d.attempt === 1
         ? `🍽 Janek, nie widzę wpisu: ${d.slot.name} (plan ${d.slot.time}). Wrzuć zdjęcie albo krótki opis, albo kliknij poniżej.`
         : `🍽 Jeszcze raz o „${d.slot.name}” (plan ${d.slot.time}), Janek: zdjęcie, opis albo „Pominąłem”.`;
+    const pushText = d.attempt === 1 ? `Janek, nie widzę wpisu: ${d.slot.name} (plan ${d.slot.time}). Dodaj zdjęcie albo krótki opis.` : `Jeszcze raz o „${d.slot.name}” (plan ${d.slot.time}): dodaj posiłek albo wybierz „Pominąłem”.`;
     try {
-      await say(env, text, buttons);
-      patch[d.key] = d.attempt === 1 ? "sent" : "sent2";
+      const sent = await deliver(cfg.notifyChannel, {
+        push: async () =>
+          (
+            await pushToAll(
+              env,
+              {
+                title: "Garda · posiłek",
+                body: pushText,
+                url: "/app/#/jedzenie?add=1",
+                tag: `rem-${local.date}-${k}`,
+                kind: "reminder",
+                rt: await reminderToken(env, local.date, k),
+                actions: [{ action: "add", title: "Dodam" }, { action: "skip", title: "Pominąłem" }, ...(d.attempt === 1 ? [{ action: "later", title: "Za godzinę" }] : [])],
+              },
+              { ttlS: 2 * 3600, urgency: "high" },
+            )
+          ).sent,
+        telegram: hasTelegram(env)
+          ? async () => {
+              await say(env, text, buttons);
+              return true;
+            }
+          : null,
+      });
+      // Bez dostarczenia żadnym kanałem nie zapisujemy stanu: następny tick spróbuje ponownie.
+      if (sent.channelUsed !== "none") patch[d.key] = d.attempt === 1 ? "sent" : "sent2";
     } catch (e) {
-      console.error("reminder send failed", e); // bez zapisu stanu: następny tick spróbuje ponownie
+      console.error("reminder send failed", e);
     }
   }
   if (Object.keys(patch).length) await st.setReminders(patch, local.date);

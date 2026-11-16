@@ -3,11 +3,15 @@
  * który aplikacja trzyma w urządzeniu. Cała logika (cele, rozpoznawanie posiłków, trener) jest ta sama co w Telegramie.
  */
 import { applyCorrection, buildAndSaveMeal, dayOverview, saveFavoriteMeal, slotNamesFor } from "./diet";
+import { b64urlDecode, hmacHex as hmac, safeEqual } from "./crypto";
+import { currentLocation } from "./loc";
+import { pushToAll, verifyReminderToken } from "./notify";
 import { GeminiTransientError, analyzeMeal } from "./gemini";
 import {
   type NutritionConfig,
   dateOfMealId,
   goalProgress,
+  type NotifyChannel,
   hhmmToMin,
   parseSlots,
   sumMacros,
@@ -17,9 +21,10 @@ import { buildPlan, buildRoutes, buildSummary, buildWeek } from "./summary";
 import { coach } from "./telegram";
 import { daysBetween, warsaw, warsawToUtc } from "./time";
 
-const enc = new TextEncoder();
 const TOKEN_DAYS = 30;
 const MAX_BODY_BYTES = 8 * 1024 * 1024;
+/** Adresy usług push przeglądarek (Chrome/FCM, Firefox, Safari, Edge/WNS). Serwer nie wysyła powiadomień gdziekolwiek indziej. */
+const PUSH_ENDPOINT = /^https:\/\/(fcm\.googleapis\.com|android\.googleapis\.com|updates\.push\.services\.mozilla\.com|[a-z0-9.-]+\.push\.apple\.com|[a-z0-9.-]+\.notify\.windows\.com)\//;
 const IMAGE_MIMES = new Set(["image/jpeg", "image/png", "image/webp", "image/heic", "image/heif"]);
 const API_RUN = { budgetMs: 55_000, attemptCapMs: 25_000 }; // żądanie HTTP nie ma 30-sekundowego limitu pracy w tle
 
@@ -28,20 +33,6 @@ const json = (data: unknown, status = 200, headers: Record<string, string> = {})
 const fail = (status: number, error: string, message: string, headers: Record<string, string> = {}) => json({ error, message }, status, headers);
 
 // ---------------- token ----------------
-
-const hex = (buf: ArrayBuffer) => [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, "0")).join("");
-
-async function hmac(key: string, msg: string): Promise<string> {
-  const k = await crypto.subtle.importKey("raw", enc.encode(key), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
-  return hex(await crypto.subtle.sign("HMAC", k, enc.encode(msg)));
-}
-
-function safeEqual(a: string, b: string) {
-  if (a.length !== b.length) return false;
-  let r = 0;
-  for (let i = 0; i < a.length; i++) r |= a.charCodeAt(i) ^ b.charCodeAt(i);
-  return r === 0;
-}
 
 /** Token "wygaśnięcie.podpis". Zmiana MCP_PASSWORD unieważnia wszystkie wydane tokeny. */
 export async function issueToken(env: Env, nowMs = Date.now()): Promise<string> {
@@ -113,6 +104,7 @@ function settingsView(cfg: NutritionConfig) {
     macroWeightKg: cfg.macroWeightKg,
     remindersOn: cfg.remindersOn,
     remindAfterMin: cfg.remindAfterMin,
+    notifyChannel: cfg.notifyChannel,
     slotsText: fmt(cfg.slots),
     weekendSlotsText: fmt(cfg.weekendSlots),
   };
@@ -138,6 +130,10 @@ function validateSettings(b: any, today: string): Partial<NutritionConfig> {
     else throw new HttpError(400, "bad_value", "Termin celu: data w przyszłości (RRRR-MM-DD).");
   }
   if ("remindersOn" in b) patch.remindersOn = Boolean(b.remindersOn);
+  if ("notifyChannel" in b) {
+    if (!["app", "telegram", "both"].includes(b.notifyChannel)) throw new HttpError(400, "bad_value", "Kanał powiadomień: aplikacja, Telegram albo oba.");
+    patch.notifyChannel = b.notifyChannel as NotifyChannel;
+  }
   for (const [key, field] of [["slotsText", "slots"], ["weekendSlotsText", "weekendSlots"]] as const) {
     if (!(key in b)) continue;
     const text = String(b[key] ?? "").trim();
@@ -174,9 +170,24 @@ export async function handleApi(request: Request, env: Env): Promise<Response> {
       return json({ token: await issueToken(env), days: TOKEN_DAYS });
     }
 
+    // Przyciski w powiadomieniu o posiłku ("Pominąłem", "Za godzinę") działają bez logowania, na podstawie podpisanego, krótko ważnego tokenu.
+    if (path === "/api/reminder-action" && method === "POST") {
+      const b = await readJson(request);
+      const v = await verifyReminderToken(env, String(b.token ?? ""));
+      if (!v) return fail(401, "bad_token", "Token wygasł lub jest niepoprawny.");
+      const today = warsaw().date;
+      if (v.date !== today) return fail(410, "stale", "To przypomnienie jest już nieaktualne.");
+      const key = `${v.date}|${v.slotKey}`;
+      if (b.action === "skip") await st.setReminders({ [key]: "skip" }, today);
+      else if (b.action === "later") await st.setReminders({ [key]: `snooze:${new Date(Date.now() + 3600_000).toISOString()}` }, today);
+      else if (b.action !== "add") return fail(400, "bad_action", "Nieznana akcja.");
+      return json({ ok: true });
+    }
+
     const auth = request.headers.get("authorization") ?? "";
     if (!(await verifyToken(env, auth.startsWith("Bearer ") ? auth.slice(7) : ""))) return fail(401, "unauthorized", "Zaloguj się ponownie.");
 
+    await st.setOrigin(url.origin); // adres serwera potrzebny m.in. jako kontakt w powiadomieniach push (VAPID)
     if (path === "/api/me" && method === "GET") return json({ ok: true });
     if (path === "/api/summary" && method === "GET") return json(await buildSummary(env));
     if (path === "/api/week" && method === "GET") return json(await buildWeek(env));
@@ -302,7 +313,58 @@ export async function handleApi(request: Request, env: Env): Promise<Response> {
     if (path === "/api/settings" && method === "GET") return json({ settings: settingsView(await st.getNutCfg()) });
     if (path === "/api/settings" && method === "PATCH") {
       const patch = validateSettings(await readJson(request), warsaw().date);
+      // Zabezpieczenie: nie pozwalamy wybrać "tylko aplikacja", dopóki żadne urządzenie nie ma włączonych powiadomień.
+      if (patch.notifyChannel === "app" && !(await st.getPushSubs()).length) {
+        throw new HttpError(409, "no_push", "Najpierw włącz powiadomienia na tym telefonie i wyślij testowe, dopiero potem wyłącz Telegram.");
+      }
       return json({ settings: settingsView(await st.patchNutCfg(patch)) });
+    }
+
+    // ----- powiadomienia push -----
+    if (path === "/api/push/key" && method === "GET") {
+      return json({ publicKey: (await st.getVapid()).publicKey, subscriptions: (await st.getPushSubs()).length });
+    }
+    if (path === "/api/push/subscribe" && method === "POST") {
+      const sub = (await readJson(request)).subscription;
+      const endpoint = String(sub?.endpoint ?? "");
+      const p256dh = String(sub?.keys?.p256dh ?? "");
+      const authKey = String(sub?.keys?.auth ?? "");
+      if (!PUSH_ENDPOINT.test(endpoint) || endpoint.length > 600) throw new HttpError(400, "bad_subscription", "Nieobsługiwany adres usługi powiadomień.");
+      let okKeys = false;
+      try {
+        const pk = b64urlDecode(p256dh);
+        okKeys = pk.length === 65 && pk[0] === 4 && b64urlDecode(authKey).length >= 16;
+      } catch {
+        okKeys = false;
+      }
+      if (!okKeys) throw new HttpError(400, "bad_subscription", "Niepoprawne klucze subskrypcji.");
+      await st.addPushSub({ endpoint, p256dh, auth: authKey, createdAt: new Date().toISOString() });
+      return json({ ok: true, subscriptions: (await st.getPushSubs()).length }, 201);
+    }
+    if (path === "/api/push/subscribe" && method === "DELETE") {
+      const endpoint = String((await readJson(request)).endpoint ?? "");
+      const removed = await st.removePushSub(endpoint);
+      return json({ ok: removed, subscriptions: (await st.getPushSubs()).length });
+    }
+    if (path === "/api/push/test" && method === "POST") {
+      if (!(await st.getPushSubs()).length) throw new HttpError(409, "no_push", "Brak urządzeń z włączonymi powiadomieniami.");
+      const r = await pushToAll(env, { title: "Garda", body: "Test powiadomień: jeśli to widzisz, trener i przypomnienia o posiłkach dotrą do Ciebie tutaj. 💪", url: "/app/#/ty/ustawienia", tag: "test", kind: "test" }, { ttlS: 600, urgency: "high" });
+      return r.sent ? json({ ok: true, sent: r.sent, failed: r.failed }) : fail(502, "push_failed", "Nie udało się dostarczyć testowego powiadomienia. Wyłącz i włącz powiadomienia jeszcze raz.");
+    }
+
+    // ----- lokalizacja (punkt startu dla pogody i tras) -----
+    if (path === "/api/location" && method === "POST") {
+      const b = await readJson(request);
+      const lat = Number(b.lat);
+      const lon = Number(b.lon);
+      if (!Number.isFinite(lat) || !Number.isFinite(lon) || Math.abs(lat) > 90 || Math.abs(lon) > 180) throw new HttpError(400, "bad_value", "Zła lokalizacja.");
+      await st.setLastLocation({ lat: Math.round(lat * 1e5) / 1e5, lon: Math.round(lon * 1e5) / 1e5, at: new Date().toISOString() });
+      const loc = await currentLocation(env);
+      return json({ ok: true, location: loc ? { kind: loc.kind, pozaDomem: loc.poza_domem, odDomuKm: (loc as any).od_domu_km ?? null } : null }, 201);
+    }
+    if (path === "/api/location" && method === "DELETE") {
+      await st.clearLastLocation();
+      return json({ ok: true });
     }
 
     // ----- trener (Claude): ta sama rozmowa co na Telegramie -----

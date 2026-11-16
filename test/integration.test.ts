@@ -4,6 +4,9 @@ import { CoachState } from "../src/state";
 import { handleTelegramWebhook, webhookSecret } from "../src/telegram";
 import { runDietReminders, nutritionReport } from "../src/diet";
 import { handleApi, issueToken, verifyToken } from "../src/api";
+import { deliver, notifyCoach, reminderToken, verifyReminderToken } from "../src/notify";
+import { encryptPayload, vapidJwt } from "../src/push";
+import { b64urlDecode, b64urlEncode } from "../src/crypto";
 
 // ---- in-memory Durable Object storage ----
 const store = new Map<string, any>();
@@ -13,7 +16,7 @@ const storage = {
   async delete(k: string) { return store.delete(k); },
   async setAlarm() {}, async getAlarm() { return null; },
 };
-const state = new (CoachState as any)({ storage }, {});
+const state = new (CoachState as any)({ storage, blockConcurrencyWhile: (fn: any) => fn() }, {});
 const env: any = {
   TELEGRAM_BOT_TOKEN: "TT", TELEGRAM_CHAT_ID: "123", GEMINI_API_KEY: "GG", MCP_PASSWORD: "pw", INTERVALS_API_KEY: "k", INTERVALS_ATHLETE_ID: "i1",
   COACH_STATE: { get: () => state, idFromName: () => "x" },
@@ -28,6 +31,8 @@ const garminDays: any[] = [];
 let icuEvents: any[] = [];
 let icuActs: any[] = [];
 const geminiBodies: any[] = [];
+const pushCalls: any[] = [];
+let pushStatus = 201;
 globalThis.fetch = (async (url: any, init?: any) => {
   const u = String(url);
   calls.push(u);
@@ -39,6 +44,10 @@ globalThis.fetch = (async (url: any, init?: any) => {
     if (method === "sendMessage") { sent.push(body); return ok({ message_id: ++msgId }); }
     if (method === "getFile") return ok({ file_path: "photos/file_1.jpg" });
     return ok(true);
+  }
+  if (u.startsWith("https://fcm.googleapis.com/")) {
+    pushCalls.push({ url: u, headers: init.headers, body: init.body });
+    return new Response(null, { status: pushStatus });
   }
   if (u.includes("generativelanguage.googleapis.com")) {
     geminiBodies.push(JSON.parse(init.body));
@@ -766,4 +775,156 @@ test("API week, plan, routes (no key), coach chat and plan request", async () =>
 
   assert.equal((await api("/api/nope")).status, 404);
   mock.timers.reset();
+});
+
+// ---------------- powiadomienia push ----------------
+
+const hexToBytes = (h: string) => Uint8Array.from(h.match(/../g)!.map((x) => parseInt(x, 16)));
+
+test("Web Push: szyfrowanie zgodne z wektorem testowym RFC 8291, JWT VAPID z poprawnym podpisem", async () => {
+  // Dodatek A RFC 8291
+  const plain = new TextEncoder().encode("When I grow up, I want to be a watermelon");
+  const uaPub = "BCVxsr7N_eNgVRqvHtD0zTZsEc6-VV-JvLexhqUzORcxaOzi6-AYWXvTBHm4bjyPjs7Vd8pZGH6SRpkNtoIAiw4";
+  const auth = "BTBZMqHH6r4Tts7J_aSIgg";
+  const asPrivate = "yfWPiYE-n46HLnH0KqZOF1fJJU3MYrct3AELtAQ-oRw";
+  const pub = b64urlDecode("BP4z9KsN6nGRTbVYI_c7VJSPQTBtkgcy27mlmlMoZIIgDll6e3vCYLocInmYWAmS6TlzAC8wEqKK6PBru3jl7A8");
+  const curve = { name: "ECDH", namedCurve: "P-256" } as const;
+  const asKeys = {
+    privateKey: await crypto.subtle.importKey("jwk", { kty: "EC", crv: "P-256", x: b64urlEncode(pub.slice(1, 33)), y: b64urlEncode(pub.slice(33, 65)), d: asPrivate, ext: true }, curve, true, ["deriveBits"]),
+    publicKey: await crypto.subtle.importKey("raw", pub, curve, true, []),
+  } as CryptoKeyPair;
+  const salt = b64urlDecode("DGv6ra1nlYgDCS1FRnbzlw");
+  const body = await encryptPayload(plain, uaPub, auth, { salt, serverKeys: asKeys });
+  const expected = "DGv6ra1nlYgDCS1FRnbzlwAAEABBBP4z9KsN6nGRTbVYI_c7VJSPQTBtkgcy27mlmlMoZIIgDll6e3vCYLocInmYWAmS6TlzAC8wEqKK6PBru3jl7A_yl95bQpu6cVPTpK4Mqgkf1CXztLVBSt2Ks3oZwbuwXPXLWyouBWLVWGNWQexSgSxsj_Qulcy4a-fN";
+  assert.equal(b64urlEncode(body), expected);
+
+  // JWT: poprawny podpis ES256 (r||s) i pola aud/exp/sub
+  const kp = (await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, true, ["sign", "verify"])) as CryptoKeyPair;
+  const keys = { publicKey: b64urlEncode(new Uint8Array((await crypto.subtle.exportKey("raw", kp.publicKey)) as ArrayBuffer)), privateJwk: (await crypto.subtle.exportKey("jwk", kp.privateKey)) as JsonWebKey };
+  const jwt = await vapidJwt(keys, "https://fcm.googleapis.com", "https://x.workers.dev", 1_700_000_000_000, 3600);
+  const [h, p, sig] = jwt.split(".");
+  assert.deepEqual(JSON.parse(new TextDecoder().decode(b64urlDecode(p))), { aud: "https://fcm.googleapis.com", exp: 1_700_003_600, sub: "https://x.workers.dev" });
+  assert.equal(b64urlDecode(sig).length, 64);
+  assert.equal(await crypto.subtle.verify({ name: "ECDSA", hash: "SHA-256" }, kp.publicKey, b64urlDecode(sig), new TextEncoder().encode(`${h}.${p}`)), true);
+});
+
+async function newBrowserSub(endpoint = "https://fcm.googleapis.com/fcm/send/abc") {
+  const kp = (await crypto.subtle.generateKey({ name: "ECDH", namedCurve: "P-256" }, true, ["deriveBits"])) as CryptoKeyPair;
+  const p256dh = b64urlEncode(new Uint8Array((await crypto.subtle.exportKey("raw", kp.publicKey)) as ArrayBuffer));
+  return { endpoint, keys: { p256dh, auth: b64urlEncode(crypto.getRandomValues(new Uint8Array(16))) } };
+}
+
+test("API push: klucz VAPID, walidacja subskrypcji, test, usuwanie wygasłej (410), kanał 'app' wymaga urządzenia", async () => {
+  mock.timers.reset(); mock.timers.enable({ apis: ["Date"], now: new Date("2026-12-10T10:00:00Z") });
+  TOKEN = await issueToken(env);
+  store.delete("push:subs");
+  pushCalls.length = 0; pushStatus = 201;
+  const key = await api("/api/push/key");
+  assert.equal(key.status, 200);
+  assert.equal(b64urlDecode(key.body.publicKey).length, 65);
+  assert.equal((await api("/api/push/key")).body.publicKey, key.body.publicKey, "klucz jest stały");
+  assert.equal((await api("/api/push/key", { token: null })).status, 401);
+
+  // bez urządzeń nie można wybrać "tylko aplikacja"
+  assert.equal((await api("/api/settings", { method: "PATCH", body: { notifyChannel: "app" } })).status, 409);
+  assert.equal((await api("/api/settings", { method: "PATCH", body: { notifyChannel: "sms" } })).status, 400);
+  assert.equal((await api("/api/push/test", { method: "POST", body: {} })).status, 409);
+
+  // walidacja subskrypcji
+  const good = await newBrowserSub();
+  assert.equal((await api("/api/push/subscribe", { method: "POST", body: { subscription: { ...good, endpoint: "http://fcm.googleapis.com/x" } } })).status, 400);
+  assert.equal((await api("/api/push/subscribe", { method: "POST", body: { subscription: { ...good, endpoint: "https://evil.example.com/x" } } })).status, 400);
+  assert.equal((await api("/api/push/subscribe", { method: "POST", body: { subscription: { ...good, keys: { ...good.keys, p256dh: "AAAA" } } } })).status, 400);
+  assert.equal((await api("/api/push/subscribe", { method: "POST", body: { subscription: good } })).status, 201);
+  assert.equal((await api("/api/push/subscribe", { method: "POST", body: { subscription: good } })).body.subscriptions, 1, "bez duplikatów");
+
+  // test: nagłówki i ładunek
+  const t = await api("/api/push/test", { method: "POST", body: {} });
+  assert.equal(t.status, 200);
+  assert.equal(pushCalls.length, 1);
+  const hd = pushCalls[0].headers;
+  assert.match(hd.Authorization, /^vapid t=[\w-]+\.[\w-]+\.[\w-]+, k=[\w-]{87}$/);
+  assert.equal(hd["Content-Encoding"], "aes128gcm");
+  assert.equal(hd.TTL, "600");
+  assert.ok(pushCalls[0].body.length > 100);
+
+  // teraz "tylko aplikacja" jest dozwolone
+  assert.equal((await api("/api/settings", { method: "PATCH", body: { notifyChannel: "app" } })).body.settings.notifyChannel, "app");
+
+  // 410 = subskrypcja usunięta
+  pushStatus = 410;
+  assert.equal((await api("/api/push/test", { method: "POST", body: {} })).status, 502);
+  assert.equal((await state.getPushSubs()).length, 0);
+  pushStatus = 201;
+  await api("/api/settings", { method: "PATCH", body: { notifyChannel: "both" } });
+  mock.timers.reset();
+});
+
+test("kanały: deliver() i zapasowy kanał; notifyCoach zawsze zapisuje w rozmowie; Telegram opcjonalny", async () => {
+  const ok = async () => 1, none = async () => 0, tgOk = async () => true, tgFail = async () => { throw new Error("x"); };
+  assert.deepEqual(await deliver("both", { push: ok, telegram: tgOk }), { push: 1, telegram: true, channelUsed: "both", fallback: false });
+  assert.deepEqual(await deliver("app", { push: ok, telegram: tgOk }), { push: 1, telegram: false, channelUsed: "app", fallback: false });
+  assert.deepEqual(await deliver("telegram", { push: ok, telegram: tgOk }), { push: 0, telegram: true, channelUsed: "telegram", fallback: false });
+  // wybrana aplikacja nie dostarczyła -> Telegram jako zapas
+  assert.deepEqual(await deliver("app", { push: none, telegram: tgOk }), { push: 0, telegram: true, channelUsed: "telegram", fallback: true });
+  // wybrany Telegram padł -> aplikacja jako zapas
+  assert.deepEqual(await deliver("telegram", { push: ok, telegram: tgFail }), { push: 1, telegram: false, channelUsed: "app", fallback: true });
+  // nic nie działa: brak dostarczenia, bez wyjątku
+  assert.equal((await deliver("both", { push: none, telegram: null })).channelUsed, "none");
+
+  // notifyCoach: zapis w rozmowie niezależnie od dostarczenia; bez Telegrama serwer nie wysypuje się
+  const noTg = { ...env, TELEGRAM_BOT_TOKEN: undefined, TELEGRAM_CHAT_ID: undefined };
+  await state.patchNutCfg({ notifyChannel: "app" });
+  const before = (await state.getChat?.())?.length;
+  const r = await notifyCoach(noTg, "Cześć Janek, dziś spokojny bieg.");
+  assert.equal(r.channelUsed, "none");
+  const log = JSON.stringify([...store.entries()]);
+  assert.ok(log.includes("Cześć Janek, dziś spokojny bieg."), "wiadomość zapisana w rozmowie");
+  // Telegram skonfigurowany -> zapas działa
+  sent.length = 0;
+  const r2 = await notifyCoach(env, "Drugie.");
+  assert.equal(r2.channelUsed, "telegram");
+  assert.equal(r2.fallback, true);
+  assert.equal(sent.length, 1);
+  await state.patchNutCfg({ notifyChannel: "both" });
+  void before;
+});
+
+test("przypomnienie o posiłku jako push z przyciskami i tokenem; akcje 'Pominąłem' i 'Za godzinę' przez /api/reminder-action", async () => {
+  mock.timers.reset(); mock.timers.enable({ apis: ["Date"], now: new Date("2026-11-17T09:31:00Z") }); // 10:31
+  store.delete("nut:meals:2026-11-17"); store.delete("nut:rem"); store.delete("push:subs");
+  const sub = await newBrowserSub("https://fcm.googleapis.com/fcm/send/rem");
+  await state.addPushSub({ endpoint: sub.endpoint, p256dh: sub.keys.p256dh, auth: sub.keys.auth, createdAt: "x" });
+  await state.patchNutCfg({ notifyChannel: "app", remindersOn: true, remindAfterMin: 180, slots: [{ name: "śniadanie", time: "07:30" }], weekendSlots: [] });
+  pushCalls.length = 0; sent.length = 0; pushStatus = 201;
+  await runDietReminders(env);
+  assert.equal(pushCalls.length, 1, "przypomnienie poszło przez push");
+  assert.equal(sent.length, 0, "a nie przez Telegram");
+  assert.equal(pushCalls[0].headers.Urgency, "high");
+
+  // token: poprawny działa, zły podpis, wygasły i nie z dziś nie
+  const tok = await reminderToken(env, "2026-11-17", "sniadanie");
+  assert.deepEqual(await verifyReminderToken(env, tok), { date: "2026-11-17", slotKey: "sniadanie" });
+  assert.equal(await verifyReminderToken(env, tok.replace(/.$/, tok.endsWith("0") ? "1" : "0")), null);
+  assert.equal(await verifyReminderToken(env, tok, Date.now() + 7 * 3600_000), null);
+  const post = (body: any) => api("/api/reminder-action", { method: "POST", body, token: null }); // bez logowania
+  assert.equal((await post({ token: "x", action: "skip" })).status, 401);
+  assert.equal((await post({ token: await reminderToken(env, "2026-11-16", "sniadanie"), action: "skip" })).status, 410);
+  assert.equal((await post({ token: tok, action: "format-c" })).status, 400);
+  assert.equal((await post({ token: tok, action: "later" })).status, 200);
+  const rem = store.get("nut:rem");
+  assert.match(JSON.stringify(rem), /snooze/);
+  assert.equal((await post({ token: tok, action: "skip" })).status, 200);
+  assert.match(JSON.stringify(store.get("nut:rem")), /skip/);
+  mock.timers.reset();
+  await state.patchNutCfg({ notifyChannel: "both" });
+});
+
+test("API location: zapis pozycji, walidacja, usunięcie", async () => {
+  TOKEN = await issueToken(env);
+  assert.equal((await api("/api/location", { method: "POST", body: { lat: 200, lon: 18 } })).status, 400);
+  assert.equal((await api("/api/location", { method: "POST", body: { lat: "x", lon: 18 } })).status, 400);
+  assert.equal((await api("/api/location", { method: "POST", body: { lat: 54.352, lon: 18.646 } })).status, 201);
+  assert.ok(JSON.stringify([...store.entries()]).includes("54.352"));
+  assert.equal((await api("/api/location", { method: "DELETE" })).status, 200);
 });
