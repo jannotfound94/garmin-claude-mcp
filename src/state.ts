@@ -251,14 +251,29 @@ export class CoachState extends DurableObject<Env> {
   // ---------- dietetyk (posiłki, waga, ulubione, przypomnienia) ----------
   // Posiłki leżą pod kluczem na dzień ("nut:meals:YYYY-MM-DD"), żeby wartość nigdy nie urosła ponad limit.
 
+  /**
+   * Zapisujemy tylko to, co użytkownik świadomie ustawił (nadpisania), a domyślne wartości biorą się z kodu. Dzięki temu
+   * zmiana domyślnych w nowej wersji działa, a nie zostaje przykryta starą kopią. Wersja 1 zapisywała całą konfigurację
+   * razem z wartościami domyślnymi: jedyną znaną starą domyślną, deficytu 400 kcal, usuwamy przy pierwszym odczycie.
+   */
+  private async nutOverrides(): Promise<Partial<NutritionConfig> & { cfgV?: number }> {
+    const c = (await this.ctx.storage.get<Partial<NutritionConfig> & { cfgV?: number }>("nut:cfg")) ?? {};
+    if (c.cfgV !== 2) {
+      const { deficitKcal, ...rest } = c;
+      const migrated = { ...rest, ...(deficitKcal !== undefined && deficitKcal !== 400 ? { deficitKcal } : {}), cfgV: 2 };
+      await this.ctx.storage.put("nut:cfg", migrated);
+      return migrated;
+    }
+    return c;
+  }
   async getNutCfg(): Promise<NutritionConfig> {
-    const c = await this.ctx.storage.get<Partial<NutritionConfig>>("nut:cfg");
-    return { ...DEFAULT_CONFIG, ...c, carbsPerKg: { ...DEFAULT_CONFIG.carbsPerKg, ...c?.carbsPerKg } };
+    const { cfgV: _v, ...c } = await this.nutOverrides();
+    return { ...DEFAULT_CONFIG, ...c, carbsPerKg: { ...DEFAULT_CONFIG.carbsPerKg, ...c.carbsPerKg } };
   }
   async patchNutCfg(patch: Partial<NutritionConfig>): Promise<NutritionConfig> {
-    const next = { ...(await this.getNutCfg()), ...patch };
-    await this.ctx.storage.put("nut:cfg", next);
-    return next;
+    const cur = await this.nutOverrides();
+    await this.ctx.storage.put("nut:cfg", { ...cur, ...patch, cfgV: 2 });
+    return this.getNutCfg();
   }
 
   async getMeals(date: string): Promise<Meal[]> {

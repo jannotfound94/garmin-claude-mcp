@@ -60,6 +60,8 @@ export interface NutritionConfig {
    * Przy nadwadze gramy na kg od całej masy dają tyle białka i tłuszczu, że deficyt się nie mieści: wtedy ustaw masę bliżej docelowej.
    */
   macroWeightKg: number | null;
+  /** Docelowa waga. Gdy nie ma jawnej masy referencyjnej, gramy na kg liczone są od niższej z wagi i celu. */
+  goalWeightKg: number | null;
   weightFallbackKg: number | null;
 }
 
@@ -71,8 +73,9 @@ export const DEFAULT_CONFIG: NutritionConfig = {
   proteinPerKg: 1.8,
   fatPerKg: 1.0,
   carbsPerKg: { rest: 3.5, easy: 4.5, quality: 6, long: 7 },
-  deficitKcal: 400, // Jan chce zredukować masę ciała (patrz TRENER.md); /cel deficyt 0 wyłącza
+  deficitKcal: 600, // Janek redukuje masę ciała 107 -> 95 kg (patrz TRENER.md); /cel deficyt 0 wyłącza
   macroWeightKg: null,
+  goalWeightKg: 95,
   weightFallbackKg: null,
 };
 
@@ -360,7 +363,7 @@ export const MIN_CARBS_PER_KG = 2; // poniżej tego (g na kg masy referencyjnej)
  */
 export function computeTargets(cfg: NutritionConfig, weightKg: number | null, dayType: DayType, base?: EnergyBase | null, ctx?: TargetCtx): Targets | null {
   if (!weightKg || weightKg < 30 || weightKg > 250) return null;
-  const refKg = cfg.macroWeightKg ?? weightKg; // masa, od której liczymy gramy na kg
+  const refKg = cfg.macroWeightKg ?? (cfg.goalWeightKg ? Math.min(weightKg, cfg.goalWeightKg) : weightKg); // masa, od której liczymy gramy na kg
   const protein = cfg.proteinPerKg * refKg;
   const fat = cfg.fatPerKg * refKg;
   const deficitDay = dayType === "rest" || dayType === "easy";
@@ -443,6 +446,23 @@ export function weightStats(weights: Weight[], today: string) {
     avgPrev7: ap,
     deltaWeek: a7 !== null && ap !== null ? r1(a7 - ap) : null,
     count28: within(27).length,
+  };
+}
+
+/** Postęp do wagi docelowej: ile zostało, tempo z regresji (jeśli są dane) i orientacyjna prognoza w tygodniach. */
+export function goalProgress(weights: Weight[], goalKg: number | null, today: string) {
+  const s = weightStats(weights, today);
+  const slope = weightSlopePerDay(weights, today, 28);
+  const trend = slope === null ? null : r1(slope * 7); // kg na tydzień
+  const toGo = s.last && goalKg ? r1(s.last.kg - goalKg) : null;
+  const weeksToGoal = toGo !== null && toGo > 0 && trend !== null && trend < -0.05 ? Math.ceil(toGo / -trend) : null;
+  return {
+    last: s.last,
+    daysSinceWeighIn: s.last ? daysBetween(s.last.date, today) : null,
+    goalKg,
+    toGoKg: toGo,
+    trendKgPerWeek: trend,
+    weeksToGoal,
   };
 }
 

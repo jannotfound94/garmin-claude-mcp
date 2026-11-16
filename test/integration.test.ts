@@ -92,9 +92,10 @@ test("end to end: setup, photo, correction, delete, text meal, coach passthrough
   assert.equal(sent.length, 0);
 
   await send({ message: { chat, date: now(), text: "/posilki śniadanie 07:30; obiad 13:30; kolacja 19:30" } });
-  assert.match(lastText(), /Zapisano plan pn–pt/);
+  assert.match(lastText(), /Masz plan pn–pt/);
   await send({ message: { chat, date: now(), text: "/waga 80,5" } });
-  assert.match(lastText(), /Zapisano 80.5 kg/);
+  assert.match(lastText(), /Mam: 80,5 kg/);
+  assert.match(lastText(), /Cel 95 kg zaliczony, jesteś 14,5 kg poniżej/); // w teście waga 80,5 kg jest poniżej celu
 
   // photo + caption
   geminiQueue.push(eggs());
@@ -133,7 +134,7 @@ test("end to end: setup, photo, correction, delete, text meal, coach passthrough
   const before = (await state.getMeals("2026-11-16")).length;
   geminiQueue.length = 0;
   await send({ message: { chat, date: now(), text: "/jem pizza" } });
-  assert.match(lastText(), /⚠️ Komenda \/jem się nie udało/);
+  assert.match(lastText(), /⚠️ Ups, coś nie pykło \(Komenda \/jem\)/);
   assert.equal((await state.getMeals("2026-11-16")).length, before);
 
   // natural-language text meal
@@ -199,7 +200,7 @@ test("reminders: none before plan+3h, one after, buttons work, snooze, no repeat
   mock.timers.setTime(new Date("2026-11-16T10:35:00Z").getTime()); // 11:35
   await runDietReminders(env);
   assert.equal(sent.length, 2);
-  assert.match(sent[1].text, /Jeszcze raz/);
+  assert.match(sent[1].text, /jeszcze raz/i);
   assert.equal(sent[1].reply_markup.inline_keyboard[0].length, 2);
   mock.timers.setTime(new Date("2026-11-16T11:30:00Z").getTime());
   await runDietReminders(env);
@@ -224,7 +225,9 @@ test("nutritionReport shape (no Garmin)", async () => {
   assert.match(String(r.garmin_uwagi), /nie jest podłączony/);
   assert.equal(r.typ_dnia.typ, "dzień bez biegu");
   assert.ok(r.cele_dzis.kcal > 1800);
-  assert.equal(r.ustawienia.deficyt_kcal, 400);
+  assert.equal(r.ustawienia.deficyt_kcal, 600);
+  assert.equal(r.waga.waga_docelowa_kg, 95);
+  assert.equal(r.waga.do_celu_kg, -14.5); // 80,5 - 95
   mock.timers.reset();
 });
 
@@ -324,4 +327,38 @@ test("several commands in one message run in order; mixed text is not treated as
   await send({ message: { chat, date: now(), text: "/start" } });
   assert.equal((await state.getMemory()).conversation.length, before);
   mock.timers.reset();
+});
+
+test("/cel cel sets the goal weight; /waga shows progress and reaching the goal", async () => {
+  mock.timers.reset(); mock.timers.enable({ apis: ["Date"], now: new Date("2026-11-19T10:00:00Z") });
+  await send({ message: { chat, date: now(), text: "/cel cel 100" } });
+  assert.equal((await state.getNutCfg()).goalWeightKg, 100);
+  assert.match(lastText(), /docelowa 100 kg/);
+  await send({ message: { chat, date: now(), text: "/waga 107" } });
+  assert.match(lastText(), /Do celu \(100 kg\) zostało 7 kg/);
+  await send({ message: { chat, date: now(), text: "/waga 99,5" } });
+  assert.match(lastText(), /Cel 100 kg zaliczony, jesteś 0,5 kg poniżej/);
+  await send({ message: { chat, date: now(), text: "/cel cel 5" } });
+  assert.match(lastText(), /Waga docelowa: 40–200 kg/);
+  assert.equal((await state.getNutCfg()).goalWeightKg, 100);
+  await send({ message: { chat, date: now(), text: "/cel cel 95" } });
+  mock.timers.reset();
+});
+
+test("config: old stored copy (deficit 400 baked in) migrates to the new default; explicit overrides survive and only overrides are stored", async () => {
+  await storage.put("nut:cfg", { slots: [], weekendSlots: [], remindersOn: true, remindAfterMin: 180, proteinPerKg: 1.8, fatPerKg: 1.0, carbsPerKg: { rest: 3.5, easy: 4.5, quality: 6, long: 7 }, deficitKcal: 400, macroWeightKg: 95, weightFallbackKg: null });
+  const c = await state.getNutCfg();
+  assert.equal(c.deficitKcal, 600); // nowa domyślna, nie zapisane 400
+  assert.equal(c.macroWeightKg, 95); // świadome ustawienie zostaje
+  assert.equal(c.goalWeightKg, 95);
+  await state.patchNutCfg({ deficitKcal: 400 }); // świadomy wybór 400 po migracji musi zostać
+  assert.equal((await state.getNutCfg()).deficitKcal, 400);
+  const stored = store.get("nut:cfg");
+  assert.equal(stored.cfgV, 2);
+  assert.equal(stored.proteinPerKg, 1.8); // pozostałość po wersji 1 (równa domyślnej) jest nieszkodliwa
+  await state.patchNutCfg({ deficitKcal: 600 });
+  assert.equal(store.get("nut:cfg").deficitKcal, 600);
+  await state.patchNutCfg({ remindersOn: false });
+  assert.equal(store.get("nut:cfg").remindersOn, false);
+  await state.patchNutCfg({ remindersOn: true });
 });

@@ -48,6 +48,7 @@ Zasady:
 9. Jeśli na zdjęciu nie ma jedzenia ani napoju, ustaw is_food=false i items=[].
 10. "meal_label": krótka nazwa dania (np. "owsianka z bananem i orzechami"). "comment": opcjonalnie jedno zdanie istotnej uwagi, inaczej null.
 11. "meal_slot": gdy podano plan posiłków Jana i Jan wyraźnie napisał, który to był posiłek ("to było moje śniadanie", "na kolację"), wpisz dokładnie jedną nazwę z planu. Inaczej null. Nie zgaduj z godziny ani z zawartości talerza.
+12. "question" i "comment" pisz luźno i krótko, po imieniu do Janka, jak kumpel-trener (bez formalności i bez moralizowania).
 Zwracasz wyłącznie JSON zgodny ze schematem.`;
 
 const N = (extra: Record<string, unknown> = {}) => ({ type: "NUMBER", ...extra });
