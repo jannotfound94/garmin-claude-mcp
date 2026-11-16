@@ -86,6 +86,10 @@ Activity, wellness and event tools now return compact objects (pass `raw: true` 
 
 See [SETUP-TRENER.md](SETUP-TRENER.md) (Polish). The worker receives Telegram messages, watches for new runs every 15 minutes and wakes a Claude Code scheduled task through its API trigger. Coach rules live in [coach/TRENER.md](coach/TRENER.md).
 
+### App (PWA and Android APK)
+
+A dark mobile app on top of the same server: daily summary with recommendations, meal tracker (photo or text), training plan with weather and route proposals, weight chart against the plan to the goal date, coach chat. It is served as static files from `public/app` and talks to the Worker through `/api` (password login, signed token, lockout after 8 failed attempts). Install it from the browser, or build an APK in GitHub Actions (`android-app/`, Capacitor). See [SETUP-APLIKACJA.md](SETUP-APLIKACJA.md) (Polish).
+
 ### Dietitian (calories and macros)
 
 Send the bot a photo of a meal (caption = note). Gemini (free AI Studio key) recognises it and estimates macros; the worker totals them, sets targets by training-day type, reminds you about missing meals and compares intake with Garmin's burned calories. Claude writes the daily and weekly summaries. See [SETUP-DIETETYK.md](SETUP-DIETETYK.md) (Polish). Run the tests with `npm test`.

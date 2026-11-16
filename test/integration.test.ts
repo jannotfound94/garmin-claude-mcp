@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { CoachState } from "../src/state";
 import { handleTelegramWebhook, webhookSecret } from "../src/telegram";
 import { runDietReminders, nutritionReport } from "../src/diet";
+import { handleApi, issueToken, verifyToken } from "../src/api";
 
 // ---- in-memory Durable Object storage ----
 const store = new Map<string, any>();
@@ -24,6 +25,8 @@ const calls: string[] = [];
 const geminiQueue: any[] = [];
 let msgId = 100;
 const garminDays: any[] = [];
+let icuEvents: any[] = [];
+let icuActs: any[] = [];
 const geminiBodies: any[] = [];
 globalThis.fetch = (async (url: any, init?: any) => {
   const u = String(url);
@@ -56,7 +59,11 @@ globalThis.fetch = (async (url: any, init?: any) => {
     }
     return new Response("{}");
   }
-  if (u.includes("intervals.icu")) return new Response("[]");
+  if (u.includes("intervals.icu")) {
+    if (u.includes("/events")) return new Response(JSON.stringify(icuEvents));
+    if (u.includes("/activities")) return new Response(JSON.stringify(icuActs));
+    return new Response("[]");
+  }
   throw new Error(`unexpected fetch ${u}`);
 }) as any;
 
@@ -508,5 +515,235 @@ test("photo job is retried with the stored file id and caption", async () => {
   assert.equal(m.source, "photo");
   assert.equal(m.photoFileId, "BIGPHOTO");
   assert.equal(m.note, "to frittata");
+  mock.timers.reset();
+});
+
+// ======================= API aplikacji =======================
+
+async function api(path: string, opts: { method?: string; body?: any; token?: string | null } = {}) {
+  const headers: Record<string, string> = { "content-type": "application/json" };
+  if (opts.token !== null) headers.authorization = `Bearer ${opts.token ?? TOKEN}`;
+  const res = await handleApi(new Request(`https://x.workers.dev${path}`, { method: opts.method ?? "GET", headers, body: opts.body === undefined ? undefined : JSON.stringify(opts.body) }), env);
+  return { status: res.status, body: (await res.json()) as any, headers: res.headers };
+}
+let TOKEN = "";
+
+test("API auth: login, wrong password, lockout after 8 failures, token tampering and expiry", async () => {
+  mock.timers.reset(); mock.timers.enable({ apis: ["Date"], now: new Date("2026-12-10T10:00:00Z") });
+  store.delete("auth");
+  assert.equal((await api("/api/summary", { token: null })).status, 401);
+  assert.equal((await api("/api/summary", { token: "garbage" })).status, 401);
+  for (let i = 0; i < 8; i++) assert.equal((await api("/api/login", { method: "POST", body: { password: "zle" }, token: null })).status, 401);
+  const locked = await api("/api/login", { method: "POST", body: { password: "pw" }, token: null });
+  assert.equal(locked.status, 429); // nawet poprawne hasło jest odrzucone podczas blokady
+  assert.ok(Number(locked.headers.get("retry-after")) > 0);
+  mock.timers.setTime(new Date("2026-12-10T10:16:00Z").getTime()); // po 15 minutach blokada mija
+  const ok = await api("/api/login", { method: "POST", body: { password: "pw" }, token: null });
+  assert.equal(ok.status, 200);
+  TOKEN = ok.body.token;
+  assert.match(TOKEN, /^\d{10}\.[0-9a-f]{64}$/);
+  assert.equal((await api("/api/me")).status, 200);
+  assert.equal(store.get("auth"), undefined, "udane logowanie czyści licznik");
+  // podrobiony i zmieniony token
+  const [exp, sig] = TOKEN.split(".");
+  assert.equal(await verifyToken(env, `${Number(exp) + 1000}.${sig}`), false);
+  assert.equal(await verifyToken(env, `${exp}.${"0".repeat(64)}`), false);
+  // token podpisany innym hasłem (zmiana MCP_PASSWORD) przestaje działać
+  assert.equal(await verifyToken({ ...env, MCP_PASSWORD: "inne" }, TOKEN), false);
+  // po wygaśnięciu (30 dni)
+  mock.timers.setTime(new Date("2027-01-15T10:00:00Z").getTime());
+  assert.equal((await api("/api/me")).status, 401);
+  assert.equal(await issueToken(env).then((t) => verifyToken(env, t)), true);
+  mock.timers.reset();
+});
+
+test("API weight, settings and validation", async () => {
+  mock.timers.reset(); mock.timers.enable({ apis: ["Date"], now: new Date("2026-12-11T10:00:00Z") });
+  TOKEN = await issueToken(env);
+  store.delete("nut:weights"); store.set("nut:cfg", { cfgV: 3 });
+  assert.equal((await api("/api/weight", { method: "POST", body: { kg: "abc" } })).status, 400);
+  assert.equal((await api("/api/weight", { method: "POST", body: { kg: 300 } })).status, 400);
+  assert.equal((await api("/api/weight", { method: "POST", body: { kg: 107, date: "2026-11-16" } })).status, 201);
+  const w = await api("/api/weight", { method: "POST", body: { kg: "106,2" } });
+  assert.equal(w.status, 201);
+  assert.equal(w.body.progress.last.kg, 106.2);
+  const g = await api("/api/weight");
+  assert.equal(g.body.entries.length, 2);
+  assert.equal(g.body.goalKg, 95);
+  assert.equal(g.body.plan.startKg, 107);
+  assert.equal(g.body.plan.goalDate, "2027-04-25");
+  assert.ok(g.body.progress.requiredKgPerWeek > 0.4);
+
+  const s0 = await api("/api/settings");
+  assert.equal(s0.body.settings.deficitKcal, 600);
+  assert.equal(s0.body.settings.garminFactor, 0.9);
+  const s1 = await api("/api/settings", { method: "PATCH", body: { deficitKcal: 500, garminFactor: 0.85, slotsText: "śniadanie 07:30; obiad 13:30", remindersOn: false } });
+  assert.equal(s1.status, 200);
+  assert.equal(s1.body.settings.deficitKcal, 500);
+  assert.equal(s1.body.settings.slotsText, "śniadanie 07:30; obiad 13:30");
+  assert.equal(s1.body.settings.remindersOn, false);
+  assert.equal((await state.getNutCfg()).slots[1].time, "13:30");
+  for (const bad of [{ deficitKcal: 900 }, { garminFactor: 2 }, { goalDate: "2020-01-01" }, { slotsText: "obiad 99:99" }, { goalWeightKg: 10 }, { proteinPerKg: 0.1 }]) {
+    const r = await api("/api/settings", { method: "PATCH", body: bad });
+    assert.equal(r.status, 400, JSON.stringify(bad));
+  }
+  assert.equal((await state.getNutCfg()).deficitKcal, 500, "zły patch nic nie zmienia");
+  const s2 = await api("/api/settings", { method: "PATCH", body: { goalDate: null, goalWeightKg: null, deficitKcal: 600, garminFactor: 0.9, remindersOn: true } });
+  assert.equal(s2.body.settings.goalDate, null);
+  await api("/api/settings", { method: "PATCH", body: { goalDate: "2027-04-25", goalWeightKg: 95, slotsText: "" } });
+  mock.timers.reset();
+});
+
+test("API meals: add by text, list, revise, favorite, delete; image validation; Gemini busy -> 503", async () => {
+  mock.timers.reset(); mock.timers.enable({ apis: ["Date"], now: new Date("2026-12-11T10:00:00Z") }); // 11:00 w Warszawie
+  TOKEN = await issueToken(env);
+  store.delete("nut:meals:2026-12-11"); store.delete("nut:favs"); geminiQueue.length = 0;
+  assert.equal((await api("/api/meals", { method: "POST", body: {} })).status, 400);
+  assert.equal((await api("/api/meals", { method: "POST", body: { image: { mime: "application/pdf", data: "x".repeat(200) } } })).status, 400);
+  assert.equal((await api("/api/meals", { method: "POST", body: { text: "jajka", time: "23:59" } })).status, 400, "godzina z przyszłości");
+  assert.equal((await api("/api/meals", { method: "POST", body: { text: "jajka", date: "2026-11-01" } })).status, 400, "za stary wpis");
+
+  geminiQueue.push({ is_food: true, meal_label: "Jajecznica", question: "Ile oleju?", items: [{ name: "jajecznica z 3 jaj", grams: 200, kcal: 330, protein_g: 21, carbs_g: 2, fat_g: 26, confidence: "medium", basis: "estimate" }] });
+  const added = await api("/api/meals", { method: "POST", body: { text: "jajecznica z 3 jaj", time: "08:15" } });
+  assert.equal(added.status, 201);
+  assert.equal(added.body.meal.time, "08:15");
+  assert.equal(added.body.meal.totals.kcal, 330);
+  assert.equal(added.body.overview.meals.length, 1);
+  assert.ok(added.body.overview.targets.kcal > 1500);
+  const id = added.body.meal.id;
+
+  geminiQueue.push({ is_food: true, meal_label: "Jajecznica", items: [{ name: "jajecznica z 3 jaj", grams: 200, kcal: 400, protein_g: 21, carbs_g: 2, fat_g: 34, confidence: "high", basis: "estimate" }] });
+  const rev = await api(`/api/meals/${id}/revise`, { method: "POST", body: { text: "na łyżce masła więcej" } });
+  assert.equal(rev.status, 200);
+  assert.equal(rev.body.meal.totals.kcal, 400);
+  assert.equal(rev.body.overview.meals.length, 1, "korekta nie dubluje");
+  assert.equal((await api(`/api/meals/${id}/revise`, { method: "POST", body: { text: " " } })).status, 400);
+  assert.equal((await api("/api/meals/20261211.ffffff/revise", { method: "POST", body: { text: "x" } })).status, 404);
+
+  assert.equal((await api(`/api/meals/${id}/favorite`, { method: "POST" })).status, 200);
+  const favs = await api("/api/favorites");
+  assert.equal(favs.body.favorites[0].name, "Jajecznica");
+  const logged = await api("/api/favorites/0/log", { method: "POST" });
+  assert.equal(logged.status, 201);
+  assert.equal(logged.body.overview.meals.length, 2);
+  assert.equal((await api("/api/favorites/9/log", { method: "POST" })).status, 404);
+
+  const day = await api("/api/meals?date=2026-12-11");
+  assert.equal(day.body.meals.length, 2);
+  assert.equal(day.body.totals.kcal, 800);
+  assert.equal((await api("/api/meals?date=zla")).status, 400);
+
+  const del = await api(`/api/meals/${logged.body.meal.id}`, { method: "DELETE" });
+  assert.equal(del.status, 200);
+  assert.equal(del.body.overview.meals.length, 1);
+  assert.equal((await api(`/api/meals/${logged.body.meal.id}`, { method: "DELETE" })).status, 404);
+  assert.equal((await api("/api/favorites/0", { method: "DELETE" })).status, 200);
+
+  // zdjęcie: poprawne trafia do Gemini jako inlineData
+  geminiBodies.length = 0;
+  geminiQueue.push(eggMeal);
+  const photo = await api("/api/meals", { method: "POST", body: { image: { mime: "image/jpeg", data: "A".repeat(500) }, text: "frittata" } });
+  assert.equal(photo.status, 201);
+  assert.equal(photo.body.meal.source, "photo");
+  assert.equal(geminiBodies[0].contents[0].parts[0].inlineData.mimeType, "image/jpeg");
+
+  // Gemini przeciążony: 503 z czytelnym kodem, nic nie zapisane
+  const before = (await state.getMeals("2026-12-11")).length;
+  geminiQueue.push(OVERLOADED, OVERLOADED);
+  const busy = await api("/api/meals", { method: "POST", body: { text: "kanapka" } });
+  assert.equal(busy.status, 503);
+  assert.equal(busy.body.error, "gemini_busy");
+  assert.equal((await state.getMeals("2026-12-11")).length, before);
+  // nie-jedzenie: 422
+  geminiQueue.push({ is_food: false, meal_label: "", items: [] });
+  assert.equal((await api("/api/meals", { method: "POST", body: { text: "buty" } })).status, 422);
+  mock.timers.reset();
+});
+
+test("API summary: food, plan today/tomorrow, recovery, recommendations; sources failing do not break it", async () => {
+  mock.timers.reset(); mock.timers.enable({ apis: ["Date"], now: new Date("2026-12-11T16:30:00Z") }); // 17:30, piątek
+  TOKEN = await issueToken(env);
+  env.GARMIN_PERSONAL_API_KEY = undefined;
+  icuEvents = [
+    { id: 1, category: "WORKOUT", type: "Run", name: "Długi bieg 18 km", start_date_local: "2026-12-12T00:00:00", distance: 18000, description: "Warmup\n- 1km" },
+    { id: 2, category: "NOTE", type: "Run", name: "Notatka", start_date_local: "2026-12-12T00:00:00" },
+    { id: 3, category: "WORKOUT", type: "Run", name: "Bieg spokojny 5 km", start_date_local: "2026-12-11T00:00:00", distance: 5000 },
+  ];
+  icuActs = [];
+  store.delete("nut:meals:2026-12-11");
+  await state.saveMeal({ id: "20261211.aaaaaa", date: "2026-12-11", time: "09:00", label: "Owsianka", source: "text", note: "", items: [], totals: { kcal: 600, protein: 25, carbs: 90, fat: 15 }, confidence: "high", question: null, createdAt: "x" });
+  const r = await api("/api/summary");
+  assert.equal(r.status, 200);
+  const b = r.body;
+  assert.equal(b.now.date, "2026-12-11");
+  assert.match(b.greeting, /Janek/);
+  assert.equal(b.marathon.goal, "poniżej 4:30:00");
+  assert.equal(b.food.totals.kcal, 600);
+  assert.equal(b.food.meals.length, 1);
+  assert.equal(b.training.today.planned.length, 1);
+  assert.equal(b.training.today.planned[0].km, 5);
+  assert.equal(b.training.tomorrow.planned.length, 1, "NOTE jest pomijana");
+  assert.equal(b.training.tomorrow.planned[0].name, "Długi bieg 18 km");
+  assert.equal(b.training.tomorrow.dayType, "long");
+  const kinds = b.recommendations.map((x: any) => x.title);
+  assert.ok(kinds.some((t: string) => /Jutro długi bieg: dołóż węgli|Brakuje/.test(t)), kinds.join(" | "));
+  assert.ok(b.recommendations.some((x: any) => x.kind === "training" && /czeka/.test(x.title)), "dzisiejszy bieg jeszcze nie zrobiony");
+  assert.ok(b.recommendations.length <= 7);
+  assert.deepEqual(b.errors, []);
+  // bieg zrobiony dzisiaj: rekomendacja po biegu, brak przypomnienia o zaległym biegu
+  icuActs = [{ id: "i1", type: "Run", start_date_local: "2026-12-11T08:00:00", distance: 5100, moving_time: 1900, name: "Bieg" }];
+  const r2 = await api("/api/summary");
+  assert.equal(r2.body.training.today.done.length, 1);
+  assert.ok(r2.body.recommendations.some((x: any) => x.title === "Po biegu"));
+  assert.ok(!r2.body.recommendations.some((x: any) => /czeka/.test(x.title)));
+  // awaria intervals.icu nie wywala całego podsumowania
+  const orig = globalThis.fetch;
+  globalThis.fetch = (async (u: any, i: any) => (String(u).includes("intervals.icu") ? new Response("boom", { status: 500 }) : (orig as any)(u, i))) as any;
+  const r3 = await api("/api/summary");
+  globalThis.fetch = orig;
+  assert.equal(r3.status, 200);
+  assert.ok(r3.body.errors.some((e: string) => /^plan:/.test(e)));
+  assert.ok(!r3.body.recommendations.some((x: any) => x.title === "Jutro bez biegania"), "awaria planu nie oznacza wolnego jutra");
+  assert.equal(r3.body.food.totals.kcal, 600);
+  icuEvents = []; icuActs = [];
+  mock.timers.reset();
+});
+
+test("API week, plan, routes (no key), coach chat and plan request", async () => {
+  mock.timers.reset(); mock.timers.enable({ apis: ["Date"], now: new Date("2026-12-11T10:00:00Z") });
+  TOKEN = await issueToken(env);
+  icuEvents = [{ id: 7, category: "WORKOUT", type: "Run", name: "Bieg 6 km", start_date_local: "2026-12-13T00:00:00", distance: 6000, moving_time: 2400 }];
+  const week = await api("/api/week");
+  assert.equal(week.status, 200);
+  assert.equal(week.body.days.length, 7);
+  assert.equal(week.body.days[6].date, "2026-12-11");
+  assert.ok(week.body.days.some((d: any) => d.kcal > 0));
+  const plan = await api("/api/plan");
+  assert.equal(plan.body.upcoming[0].km, 6);
+  assert.equal(plan.body.upcoming[0].minutes, 40);
+  icuEvents = [];
+
+  delete env.ORS_API_KEY;
+  assert.equal((await api("/api/routes", { method: "POST", body: { km: 8 } })).status, 501);
+  assert.equal((await api("/api/routes", { method: "POST", body: { km: 100 } })).status, 400);
+
+  const before = (await state.getMemory()).conversation.length;
+  assert.equal((await api("/api/coach", { method: "POST", body: { text: "  " } })).status, 400);
+  assert.equal((await api("/api/coach", { method: "POST", body: { text: "Janek tu, jaki plan na weekend?" } })).status, 201);
+  const chat = await api("/api/coach");
+  assert.equal(chat.body.messages.length, before + 1);
+  assert.equal(chat.body.messages[chat.body.messages.length - 1].text, "Janek tu, jaki plan na weekend?");
+  assert.equal(chat.body.awaiting, true);
+  await state.logOutgoing("Plan jest w kalendarzu, miłego biegania!");
+  assert.equal((await api("/api/coach")).body.awaiting, false);
+  assert.ok((await state.getMemory()).pending.includes("NOWA_WIADOMOSC_OD_JANA"), "trener zostaje obudzony");
+
+  const pl = await api("/api/coach/plan", { method: "POST", body: { weeks: 3, note: "bez wtorku" } });
+  assert.equal(pl.status, 201);
+  const last = (await state.getMemory()).conversation.at(-1)!;
+  assert.match(last.text, /plan treningowy na najbliższe 3 tygodnie/);
+  assert.match(last.text, /bez wtorku/);
+
+  assert.equal((await api("/api/nope")).status, 404);
   mock.timers.reset();
 });

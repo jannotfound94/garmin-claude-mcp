@@ -1,0 +1,20 @@
+{
+  "name": "janek-trener-android",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Opakowanie aplikacji Janek Trener (PWA z public/app) w APK przez Capacitor. Buduje je workflow .github/workflows/build-apk.yml.",
+  "scripts": {
+    "config": "node scripts/make-config.mjs"
+  },
+  "dependencies": {
+    "@capacitor/android": "8.6.2",
+    "@capacitor/core": "8.6.2"
+  },
+  "devDependencies": {
+    "@capacitor/assets": "^3.0.5",
+    "@capacitor/cli": "8.6.2"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
