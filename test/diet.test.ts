@@ -189,3 +189,65 @@ test("analyzeMeal: 404 on primary falls back to the second model; both failing r
   });
   await assert.rejects(analyzeMeal({} as any, input), /GEMINI_API_KEY/);
 });
+
+test("targets from energy base: day factor, deficit only rest/easy, carbs fill the rest, carb floor", () => {
+  const base = { kcal: 3000, source: "garmin" as const };
+  const e = computeTargets(DEFAULT_CONFIG, 107, "easy", base)!; // 3090 kcal; B 193, T 107 -> W (3090-772-963)/4
+  assert.equal(e.protein, 193);
+  assert.equal(e.fat, 107);
+  assert.equal(e.carbs, 339);
+  assert.ok(Math.abs(e.kcal - 3090) <= 3, String(e.kcal));
+  assert.equal(e.source, "garmin");
+  const d = { ...DEFAULT_CONFIG, deficitKcal: 300 };
+  const rest = computeTargets(d, 80, "rest", base)!; // B 144, T 80 -> 2790 - 300 = 2490
+  assert.ok(Math.abs(rest.kcal - (3000 * 0.93 - 300)) <= 3, String(rest.kcal));
+  assert.equal(rest.deficitApplied, 300);
+  const long = computeTargets(d, 80, "long", base)!;
+  assert.ok(Math.abs(long.kcal - 3600) <= 3);
+  assert.equal(long.deficitApplied, 0);
+  assert.match(long.note!, /bez deficytu/);
+  // przy 107 kg białko i tłuszcz zabierają tyle kcal, że podłoga węglowodanów ogranicza deficyt w dzień bez biegu
+  const heavy = computeTargets(d, 107, "rest", base)!;
+  assert.equal(heavy.carbs, Math.round(2.5 * 107));
+  assert.ok(heavy.deficitApplied < 300);
+  assert.match(heavy.note!, /minimum węglowodanów/);
+  const tight = computeTargets({ ...DEFAULT_CONFIG, deficitKcal: 700 }, 107, "rest", { kcal: 2500, source: "kalibracja" })!;
+  assert.equal(tight.carbs, Math.round(2.5 * 107)); // podłoga 2,5 g/kg
+  assert.match(tight.note!, /minimum węglowodanów/);
+  // bez bazy: stare zachowanie z g/kg
+  assert.equal(computeTargets(DEFAULT_CONFIG, 107, "easy")!.source, "g/kg");
+});
+
+test("explicit slot satisfies that slot regardless of the time of entry", () => {
+  const slots = slotsFor(cfg, "Mon"); // śniadanie 07:30, obiad 13:30, kolacja 19:30
+  assert.deepEqual([...satisfiedSlots(slots, [{ time: "15:01", slot: "śniadanie" }], 180)], [0]);
+  assert.deepEqual([...satisfiedSlots(slots, [{ time: "15:01" }], 180)], [1]); // bez wskazania: najbliższe okno czasowe (obiad)
+  // dwa wpisy wskazane jako śniadanie zaliczają to okno jeden raz (a nie dwa różne okna)
+  assert.equal(satisfiedSlots(slots, [{ time: "09:00", slot: "śniadanie" }, { time: "08:00", slot: "Śniadanie" }], 180).size, 1);
+});
+
+test("parseAnalysis keeps meal_slot only when it matches the plan", () => {
+  const mk = (slot: any) => ({ candidates: [{ content: { parts: [{ text: JSON.stringify({ is_food: true, meal_label: "x", meal_slot: slot, items: [{ name: "a", kcal: 100, protein_g: 5, carbs_g: 10, fat_g: 4, confidence: "high", basis: "estimate" }] }) }] } }] });
+  assert.equal(parseAnalysis(mk("Śniadanie"), "m", ["śniadanie", "obiad"]).slot, "śniadanie");
+  assert.equal(parseAnalysis(mk("brunch"), "m", ["śniadanie", "obiad"]).slot, null);
+  assert.equal(parseAnalysis(mk(null), "m", ["śniadanie"]).slot, null);
+  assert.equal(parseAnalysis(mk("śniadanie"), "m").slot, null); // brak planu
+});
+
+test("analyzeMeal: timeout on primary falls back to the second model; message in Polish when all time out", async () => {
+  const timeout = () => Object.assign(new Error("The operation was aborted due to timeout"), { name: "TimeoutError" });
+  const orig = globalThis.fetch;
+  const models: string[] = [];
+  globalThis.fetch = (async (url: any) => {
+    const m = String(url).split("/models/")[1].split(":")[0];
+    models.push(m);
+    if (m === "gemini-3.5-flash") throw timeout();
+    return new Response(JSON.stringify(okBody));
+  }) as any;
+  try {
+    assert.equal((await analyzeMeal({ GEMINI_API_KEY: "k" } as any, input)).model, "gemini-3.5-flash-lite");
+    assert.deepEqual(models, ["gemini-3.5-flash", "gemini-3.5-flash-lite"]); // bez ponawiania wariantów myślenia po timeoucie
+    globalThis.fetch = (async () => { throw timeout(); }) as any;
+    await assert.rejects(analyzeMeal({ GEMINI_API_KEY: "k" } as any, input), (e: Error) => /brak odpowiedzi w ciągu/.test(e.message) && !/aborted/.test(e.message));
+  } finally { globalThis.fetch = orig; }
+});

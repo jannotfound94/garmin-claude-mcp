@@ -59,7 +59,8 @@ Wyślij botowi kolejno:
 | --- | --- |
 | Zapisać posiłek | wyślij **zdjęcie**; podpis pod zdjęciem to notatka („połowa porcji”, „150 g”, „na oliwie”, „zjadłem o 8:15”) |
 | Zapisać bez zdjęcia | `/jem 2 jajka, kromka chleba, masło` albo po prostu „zjadłem …” / „na kolację …” |
-| Poprawić wpis | **odpowiedz** (Telegram: „Odpowiedz”) na wiadomość bota z tym posiłkiem, np. „to było 200 g”, „bez sosu”, „to skyr naturalny” |
+| Poprawić wpis | **odpowiedz** (Telegram: „Odpowiedz”) na wiadomość bota z tym posiłkiem, np. „to było 200 g”, „bez sosu”, „to skyr naturalny”. Zwykła wiadomość bez „Odpowiedz” trafia do trenera, nie do dietetyka |
+| Wskazać, który to był posiłek (np. wpisujesz śniadanie po południu) | dopisz w opisie lub w poprawce „to było moje śniadanie” (nazwa z `/posilki`). Wpis liczy się wtedy do śniadania, a przypomnienie o nim nie przychodzi |
 | Usunąć wpis | przycisk 🗑 pod wiadomością albo `/usun 2` (numer z `/dzis`) |
 | Szybko dodać to, co jesz często | po zapisaniu stuknij ⭐ **Ulubione**; potem `/ulubione` i jedno stuknięcie |
 | Zobaczyć dzień | `/dzis` lub `/dzis wczoraj`: posiłki, cele, ile zostało, spalanie z Garmina |
@@ -77,7 +78,16 @@ Gdy model nie jest pewny składnika, który wyraźnie zmienia wynik, zadaje jedn
 
 ## Jak to liczy cele
 
-Cele dnia = masa ciała × gramy na kg, zależnie od typu dnia, który serwer ustala z kalendarza intervals.icu i z tego, co faktycznie zrobiłeś (bierze cięższą wersję): dzień bez biegu, łatwy bieg, akcent (tempo/interwały) albo długi bieg (od 16 km lub 100 min, albo „długi” w nazwie). Deficyt (jeśli go ustawisz) obowiązuje tylko w dni bez biegu i łatwe, kosztem węglowodanów, nigdy białka, a węglowodany nie spadają poniżej 2,5 g/kg.
+**Kalorie dnia** wynikają z Twojego rzeczywistego zapotrzebowania:
+1. Na początku: średnie spalanie z Garmina z ostatnich 14 dni (spoczynkowe + aktywne × 0,85, bo kalorie aktywne bywają zawyżone).
+2. Po ok. 3–4 tygodniach (min. 14 zapisanych dni i 4 ważenia): zapotrzebowanie wyliczone z bilansu spożycia i trendu wagi. To dokładniejsze niż Garmin i zastępuje go automatycznie.
+3. Bez żadnych z tych danych: cele liczone czysto z gramów na kg masy ciała.
+
+Zapotrzebowanie jest mnożone przez współczynnik zależny od typu dnia (bez biegu 0,93; łatwy bieg 1,03; akcent 1,08; długi bieg 1,20). **Białko** (domyślnie 1,8 g/kg) i **tłuszcz** (1,0 g/kg) idą z masy ciała, a **węglowodany dopełniają resztę**. Typ dnia serwer ustala z kalendarza intervals.icu i z tego, co faktycznie zrobiłeś (bierze cięższą wersję): dzień bez biegu, łatwy bieg, akcent (tempo/interwały) albo długi bieg (od 16 km lub 100 min, albo „długi” w nazwie).
+
+**Deficyt** (jeśli go ustawisz przez `/cel deficyt 300`) obowiązuje tylko w dni bez biegu i łatwe, kosztem węglowodanów, nigdy białka. Węglowodany nie spadają poniżej 2,5 g/kg, więc przy dużej masie ciała deficyt bywa ograniczony (bot pisze o tym w `/dzis`). Przy dużej masie ciała warto też obniżyć białko, np. `/cel bialko 1,5`, bo 1,8 g/kg całkowitej masy może być więcej, niż potrzeba.
+
+`/cel` pokazuje aktualne cele dla każdego typu dnia i skąd pochodzą.
 
 ## Rozwiązywanie problemów
 

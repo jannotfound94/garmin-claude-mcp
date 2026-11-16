@@ -23,6 +23,7 @@ const sent: any[] = [];
 const calls: string[] = [];
 const geminiQueue: any[] = [];
 let msgId = 100;
+const geminiBodies: any[] = [];
 globalThis.fetch = (async (url: any, init?: any) => {
   const u = String(url);
   calls.push(u);
@@ -36,6 +37,7 @@ globalThis.fetch = (async (url: any, init?: any) => {
     return ok(true);
   }
   if (u.includes("generativelanguage.googleapis.com")) {
+    geminiBodies.push(JSON.parse(init.body));
     const next = geminiQueue.shift();
     if (!next) throw new Error("unexpected gemini call");
     return new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: JSON.stringify(next) }] } }] }));
@@ -224,5 +226,29 @@ test("regression: /posilki with a slot name starting with 'sob' sets weekday pla
   assert.equal((await state.getNutCfg()).weekendSlots.length, 0);
   await send({ message: { chat, date: now(), text: "/posilki zupa 99:99" } });
   assert.match(lastText(), /Zła godzina/);
+  mock.timers.reset();
+});
+
+test("meal described as 'śniadanie' but sent at 15:01 is labelled and counted as breakfast; plan is passed to the model", async () => {
+  mock.timers.reset(); mock.timers.enable({ apis: ["Date"], now: new Date("2026-11-17T14:01:00Z") }); // 15:01 we wtorek
+  await send({ message: { chat, date: now(), text: "/posilki śniadanie 07:30; obiad 13:30; kolacja 19:30" } });
+  geminiBodies.length = 0;
+  geminiQueue.push({ is_food: true, meal_label: "Szakszuka", meal_slot: "śniadanie", items: [{ name: "szakszuka", grams: 250, kcal: 330, protein_g: 18, carbs_g: 12, fat_g: 22, confidence: "medium", basis: "estimate" }] });
+  await send({ message: { chat, date: now(), text: "/jem szakszuka, to było moje śniadanie" } });
+  const userPart = geminiBodies[0].contents[0].parts.map((p: any) => p.text ?? "").join("\n");
+  assert.match(userPart, /Plan posiłków Jana.*śniadanie, obiad, kolacja/);
+  const meals = await state.getMeals("2026-11-17");
+  assert.equal(meals[0].slot, "śniadanie");
+  assert.match(lastText(), /^🍽 śniadanie · 15:01/);
+  // correction without a slot keeps the slot
+  geminiQueue.push({ is_food: true, meal_label: "Szakszuka", meal_slot: null, items: [{ name: "szakszuka", grams: 300, kcal: 380, protein_g: 20, carbs_g: 14, fat_g: 26, confidence: "high", basis: "estimate" }] });
+  await send({ message: { chat, date: now(), text: "to było 300 g", reply_to_message: { message_id: msgId } } });
+  assert.equal((await state.getMeals("2026-11-17"))[0].slot, "śniadanie");
+  assert.match(lastText(), /^🍽 śniadanie/);
+  // breakfast reminder: the slot counts as done even though the entry is at 15:01 (set earlier than reminder time via state)
+  sent.length = 0;
+  await state.setReminders({}, "2026-11-17");
+  await runDietReminders(env);
+  assert.ok(!sent.some((m) => /śniadanie \(plan/.test(m.text)), "śniadanie nie jest przypominane");
   mock.timers.reset();
 });
