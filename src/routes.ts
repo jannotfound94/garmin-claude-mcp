@@ -311,7 +311,7 @@ export function mapPage(title: string, coords: number[][], gpxUrl: string): stri
 <style>html,body{margin:0;height:100%;font-family:system-ui;background:#fff}#map{position:absolute;top:56px;bottom:0;left:0;right:0}
 header{height:56px;display:flex;align-items:center;justify-content:space-between;padding:0 16px;box-sizing:border-box;border-bottom:1px solid #ddd}
 a.btn{background:#1a73e8;color:#fff;padding:8px 12px;border-radius:6px;text-decoration:none}</style></head>
-<body><header><b>${title}</b><a class="btn" href="${gpxUrl}">Pobierz GPX</a></header><div id="map"></div>
+<body><header><a class="btn back" href="/app/#/plan" onclick="if(history.length>1){history.back();return false}">← Wróć</a><b>${title}</b><a class="btn" href="${gpxUrl}">GPX</a></header><div id="map"></div>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
 <script>const p=${latlngs};const m=L.map('map');L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'&copy; OpenStreetMap'}).addTo(m);
 const l=L.polyline(p,{color:'#d32f2f',weight:5}).addTo(m);L.circleMarker(p[0],{radius:7,color:'#1a73e8'}).addTo(m).bindPopup('Start / meta');m.fitBounds(l.getBounds(),{padding:[20,20]});</script>

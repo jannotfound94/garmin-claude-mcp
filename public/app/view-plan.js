@@ -88,7 +88,7 @@ function planCard(p, weatherDay) {
           routes.replaceChildren(
             ...(r.note ? [h("div", { class: "small muted" }, r.note)] : []),
             ...r.options.map((o) =>
-              h("div", { class: "route" }, h("div", { class: "row between" }, h("strong", {}, `Trasa ${o.label} · ${n1(o.km)} km`), chip(o.kind === "park" ? "przez parki" : "pętla ORS", o.kind === "park" ? "good" : "")), h("div", { class: "small muted" }, `nieutwardzona ${n0(o.unpavedPct)}% · zieleń ${n1(o.greenAvg)}/10 · dwa razy tą samą drogą ${n0(o.retracePct)}%${o.via ? ` · przez ${o.via.join(", ")}` : ""}`), h("div", { class: "links" }, h("a", { href: o.mapUrl, target: "_blank", rel: "noopener" }, "Mapa"), h("a", { href: o.gpxUrl, target: "_blank", rel: "noopener" }, "Pobierz GPX"))),
+              h("div", { class: "route" }, h("div", { class: "row between" }, h("strong", {}, `Trasa ${o.label} · ${n1(o.km)} km`), chip(o.kind === "park" ? "przez parki" : "pętla ORS", o.kind === "park" ? "good" : "")), h("div", { class: "small muted" }, `nieutwardzona ${n0(o.unpavedPct)}% · zieleń ${n1(o.greenAvg)}/10 · dwa razy tą samą drogą ${n0(o.retracePct)}%${o.via ? ` · przez ${o.via.join(", ")}` : ""}`), h("div", { class: "links" }, h("a", { href: o.mapUrl }, "Mapa"), h("a", { href: o.gpxUrl, download: "" }, "Pobierz GPX"))),
             ),
           );
         } catch (e) {

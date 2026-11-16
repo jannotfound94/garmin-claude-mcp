@@ -72,15 +72,24 @@ jobs:
       - name: Add Android platform
         run: npx cap add android
 
+      # Własna MainActivity: przycisk "wstecz" cofa historię (inaczej zamyka aplikację) i pobrania GPX idą do przeglądarki.
+      - name: Install MainActivity (back button, downloads)
+        run: |
+          set -euo pipefail
+          TARGET=$(find android/app/src/main/java -name MainActivity.java | head -n1)
+          test -n "$TARGET" || { echo "Nie znaleziono MainActivity.java"; exit 1; }
+          grep -q '^package pl.janek.garda;' "$TARGET" || { echo "Nieoczekiwany pakiet MainActivity: $(head -n3 "$TARGET")"; exit 1; }
+          cp native/MainActivity.java "$TARGET"
+
       - name: Launcher icons
         run: npx capacitor-assets generate --android --assetPath assets
 
-      - name: Patch manifest (camera for meal photos) and version
+      - name: Patch manifest (camera for meal photos, location for routes) and version
         run: |
           set -euo pipefail
           MANIFEST=android/app/src/main/AndroidManifest.xml
-          sed -i 's#<uses-permission android:name="android.permission.INTERNET" />#<uses-permission android:name="android.permission.INTERNET" />\n    <uses-permission android:name="android.permission.CAMERA" />\n    <uses-feature android:name="android.hardware.camera" android:required="false" />#' "$MANIFEST"
-          grep -q 'android.permission.CAMERA' "$MANIFEST" || { echo "Nie udało się dodać uprawnienia aparatu do manifestu"; exit 1; }
+          sed -i 's#<uses-permission android:name="android.permission.INTERNET" />#<uses-permission android:name="android.permission.INTERNET" />\n    <uses-permission android:name="android.permission.CAMERA" />\n    <uses-feature android:name="android.hardware.camera" android:required="false" />\n    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />\n    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />\n    <uses-feature android:name="android.hardware.location" android:required="false" />#' "$MANIFEST"
+          for P in CAMERA ACCESS_COARSE_LOCATION ACCESS_FINE_LOCATION; do grep -q "android.permission.$P" "$MANIFEST" || { echo "Nie udało się dodać uprawnienia $P do manifestu"; exit 1; }; done
           sed -i "s/versionCode 1/versionCode ${{ github.run_number }}/; s/versionName \"1.0\"/versionName \"1.0.${{ github.run_number }}\"/" android/app/build.gradle
           grep -q "versionCode ${{ github.run_number }}" android/app/build.gradle || { echo "Nie udało się ustawić wersji"; exit 1; }
 
