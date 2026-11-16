@@ -20,6 +20,7 @@ import {
 } from "./nutrition";
 import { buildPlan, buildRoutes, buildSummary, buildWeek } from "./summary";
 import { buildTextRoutes } from "./textroute";
+import { HOUR, MAX_FAST_H, MIN_FAST_H, clampHours, fastStats, phaseMs } from "./fasting";
 import { coach } from "./telegram";
 import { daysBetween, warsaw, warsawToUtc } from "./time";
 
@@ -94,6 +95,22 @@ function mapGeminiError(e: unknown): never {
 
 // ---------------- ustawienia ----------------
 
+/** Stan postu przerywanego dla aplikacji (czasy w ms, odliczanie liczy aplikacja; serwer nadrabia zaległe przejścia faz). */
+async function fastingView(env: Env) {
+  const st = coach(env);
+  const cfg = await st.getNutCfg();
+  const hours = clampHours(cfg.fastHours);
+  const state = await st.fastTick(false);
+  const stats = fastStats(await st.getFastHistory());
+  return {
+    now: Date.now(),
+    goalHours: hours,
+    windowHours: 24 - hours,
+    state: state ? { phase: state.phase, start: state.start, end: state.end, goalHours: state.goalHours, totalMs: phaseMs(state.phase, state.goalHours) } : null,
+    stats,
+  };
+}
+
 function settingsView(cfg: NutritionConfig) {
   const fmt = (l: { name: string; time: string }[]) => l.map((s) => `${s.name} ${s.time}`).join("; ");
   return {
@@ -107,6 +124,7 @@ function settingsView(cfg: NutritionConfig) {
     remindersOn: cfg.remindersOn,
     remindAfterMin: cfg.remindAfterMin,
     notifyChannel: cfg.notifyChannel,
+    fastHours: cfg.fastHours,
     slotsText: fmt(cfg.slots),
     weekendSlotsText: fmt(cfg.weekendSlots),
   };
@@ -132,6 +150,7 @@ function validateSettings(b: any, today: string): Partial<NutritionConfig> {
     else throw new HttpError(400, "bad_value", "Termin celu: data w przyszłości (RRRR-MM-DD).");
   }
   if ("remindersOn" in b) patch.remindersOn = Boolean(b.remindersOn);
+  if ("fastHours" in b) patch.fastHours = Math.round(num("fastHours", MIN_FAST_H, MAX_FAST_H, "Długość postu (godziny)"));
   if ("notifyChannel" in b) {
     if (!["app", "telegram", "both"].includes(b.notifyChannel)) throw new HttpError(400, "bad_value", "Kanał powiadomień: aplikacja, Telegram albo oba.");
     patch.notifyChannel = b.notifyChannel as NotifyChannel;
@@ -329,6 +348,28 @@ export async function handleApi(request: Request, env: Env): Promise<Response> {
         return fail(status, problem.error, problem.message ?? "Nie udało się wyznaczyć trasy.");
       }
       return json(res);
+    }
+
+    // ----- post przerywany -----
+    if (path === "/api/fasting" && method === "GET") return json(await fastingView(env));
+    if (path === "/api/fasting/finish-eating" && method === "POST") {
+      const b = await readJson(request).catch(() => ({}) as any);
+      const now = Date.now();
+      let at: number | undefined;
+      if (b.at != null) {
+        if (typeof b.at !== "string" || !validHhmm(b.at)) throw new HttpError(400, "bad_time", "Zła godzina.");
+        // Godzina z dzisiaj, a jeśli wypadałaby w przyszłości, to z wczoraj; najwyżej 20 godzin wstecz.
+        const w = warsaw();
+        at = warsawToUtc(`${w.date} ${b.at}`).getTime();
+        if (at > now + 60_000) at -= 24 * HOUR;
+        if (now - at > 20 * HOUR) throw new HttpError(400, "bad_time", "Ta godzina jest zbyt dawno temu.");
+      }
+      await st.fastFinishEating(at, b.restart === true);
+      return json(await fastingView(env));
+    }
+    if (path === "/api/fasting/start-eating" && method === "POST") {
+      await st.fastStartEating();
+      return json(await fastingView(env));
     }
 
     // ----- ustawienia -----

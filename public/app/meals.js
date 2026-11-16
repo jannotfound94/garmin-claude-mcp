@@ -1,5 +1,6 @@
 // Posiłki: karta kalorii z pierścieniem, dodawanie (opis i/lub zdjęcie), poprawki, karta posiłku.
 import { ApiError, api } from "./api.js";
+import { askFastAfterMeal } from "./fasting.js";
 import { ring } from "./charts.js";
 import { KIND_LABEL, MEAL_KINDS, SLOT_ICON, bar, badge, card, chip, dateObj, errMsg, fmtDay, h, icon, invalidateSummary, n0, nowHm, openSheet, sleep, todayLocal, toast } from "./ui.js";
 
@@ -116,6 +117,7 @@ export function openAddMeal({ date = todayLocal(), onSaved } = {}) {
         toast(`Zapisano: ${r.meal.label} (${n0(r.meal.totals.kcal)} kcal)`);
         close();
         onSaved && onSaved(r);
+        askFastAfterMeal(r.meal);
       } catch (e) {
         status.replaceChildren(statusRow(`⚠️ ${errMsg(e)}${e.code === "network" ? " Sprawdź listę posiłków, mógł się zapisać." : ""}`, false));
         submit.disabled = false;

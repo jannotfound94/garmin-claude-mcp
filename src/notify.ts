@@ -13,7 +13,7 @@ export interface PushPayload {
   body: string;
   url: string; // względny, np. "/app/#/ty/trener"
   tag?: string;
-  kind: "coach" | "reminder" | "test";
+  kind: "coach" | "reminder" | "test" | "fast";
   actions?: { action: string; title: string }[];
   rt?: string; // token akcji przypomnienia (patrz reminderToken)
 }
@@ -84,6 +84,20 @@ export async function notifyCoach(env: Env, text: string): Promise<Delivery> {
     telegram: hasTelegram(env)
       ? async () => {
           await sendTelegram(env, text);
+          return true;
+        }
+      : null,
+  });
+}
+
+/** Krótkie powiadomienie systemowe (np. post przerywany): kanały wg ustawienia, bez zapisu w rozmowie z trenerem. */
+export async function notifySystem(env: Env, n: { title: string; body: string; url: string; tag: string; kind: PushPayload["kind"] }): Promise<Delivery> {
+  const cfg = await coach(env).getNutCfg();
+  return deliver(cfg.notifyChannel, {
+    push: async () => (await pushToAll(env, n, { ttlS: 6 * 3600, urgency: "high" })).sent,
+    telegram: hasTelegram(env)
+      ? async () => {
+          await sendTelegram(env, `⏱ ${n.title}\n${n.body}`);
           return true;
         }
       : null,

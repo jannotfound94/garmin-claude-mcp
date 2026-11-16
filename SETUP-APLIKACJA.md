@@ -76,6 +76,17 @@ Plan → „Trasa z opisu”: wpisz albo podyktuj (mikrofon klawiatury Gboard) o
 
 Gemini rozbija opis na miejsca po kolei, miejsca są wyszukiwane na mapie (OpenStreetMap i geokoder OpenRouteService), a trasa idzie dokładnie przez nie. Przy podanym dystansie trasa jest wydłużana objazdem, najlepiej w miejscu wskazanym w opisie („po tej stronie Wisły” = przed pierwszym miejscem). Sprawdź listę „Rozpoznane punkty” i numerowane punkty na mapie: niepewnie rozpoznane są oznaczone. Jeśli coś jest źle, doprecyzuj opis (dzielnica, ulica, pełna nazwa) i wyznacz jeszcze raz. Trener ma do tego narzędzie `proposeRouteFromText`. Wymaga sekretów `ORS_API_KEY` i `GEMINI_API_KEY`.
 
+## Post przerywany
+
+Pierwsza karta na ekranie „Dziś” to zegar postu przerywanego (domyślnie 16:8). **Post** to czas, gdy nie jesz, **okno** to czas, gdy jesz.
+
+- „Skończyłem jeść” startuje post i odlicza 16 godzin. „Skończyłem o innej godzinie…” pozwala wpisać godzinę wstecz.
+- „Zaczynam jeść” kończy post wcześniej (zapisze go jako przerwany) i otwiera okno.
+- Gdy czas fazy minie, następna zaczyna się sama (po poście okno 8 godzin, po oknie post) i przychodzi powiadomienie, tą samą drogą co wiadomości trenera (aplikacja i/lub Telegram). Powiadomienie jest wysyłane z serwera, więc dociera także przy zamkniętej aplikacji.
+- Po dodaniu kolacji lub posiłku po 18:00 aplikacja pyta „To już koniec jedzenia?” i jednym kliknięciem zaczyna post.
+- Karta pokazuje serię osiągniętych postów, średnią z ostatnich siedmiu i wykres ostatnich postów.
+- Długość postu zmienisz w Ty → Ustawienia („Post przerywany”), od 10 do 22 godzin. Okno to reszta doby.
+
 ## Jak korzystać
 
 - **Dodaj posiłek:** pomarańczowy przycisk ＋ na dole (działa na każdym ekranie). Zdjęcie z aparatu lub z galerii, opis tekstem, godzina (gdy dopisujesz coś z wcześniej). Jeśli Gemini jest chwilowo przeciążony, aplikacja sama ponowi próbę kilka razy.

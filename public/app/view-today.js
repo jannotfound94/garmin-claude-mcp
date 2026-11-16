@@ -1,5 +1,6 @@
+import { fastingCard } from "./fasting.js";
 import { pushState, pushSupported } from "./push.js";
-// Widok "Dziś": dashboard z kart. Priorytet dnia, kalorie, tydzień biegowy, trening dziś i jutro, seria zapisów,
+// Widok "Dziś": dashboard z kart. Post przerywany, wskazówki, kalorie, tydzień biegowy, trening dziś i jutro, seria zapisów,
 // spalanie z Garmina, regeneracja, waga i źródła danych.
 import { areaChart, ring, weightChart } from "./charts.js";
 import { kcalCard, openAddMeal } from "./meals.js";
@@ -13,31 +14,30 @@ export function header(title, sub, ...right) {
 const avatarBtn = () => h("button", { class: "avatar", "aria-label": "Ty: postęp i ustawienia", onclick: go("#/ty") }, "J");
 
 export async function viewToday(root) {
-  root.append(header("Dziś", "", avatarBtn()), loading("Zbieram dane z Garmina, planu i pogody…"));
+  // Zegar postu przerywanego ładuje się osobno i od razu, bez czekania na resztę danych.
+  const fast = fastingCard(root);
+  root.append(header("Dziś", "", avatarBtn()), fast, loading("Zbieram dane z Garmina, planu i pogody…"));
   let d;
   try {
     d = await getSummary(true);
   } catch (e) {
-    root.replaceChildren(header("Dziś", "", iconButton("refresh", "Odśwież", rerender), avatarBtn()), h("div", { class: "card" }, h("div", {}, `⚠️ ${errMsg(e)}`), h("button", { class: "btn", onclick: rerender }, "Spróbuj ponownie")));
+    root.replaceChildren(header("Dziś", "", iconButton("refresh", "Odśwież", rerender), avatarBtn()), fast, h("div", { class: "card" }, h("div", {}, `⚠️ ${errMsg(e)}`), h("button", { class: "btn", onclick: rerender }, "Spróbuj ponownie")));
     return;
   }
   const out = [];
   out.push(header(d.greeting, `${d.now.weekdayPl} ${d.now.date.slice(8)}.${d.now.date.slice(5, 7)} · ${d.now.time}`, iconButton("refresh", "Odśwież", async () => { await getSummary(true).catch(() => {}); rerender(); }), avatarBtn()));
+
+  // Zegar postu przerywanego jest pierwszą kartą (zamiast "priorytetu dnia").
+  out.push(fast);
 
   // Baner zachęcający do włączenia powiadomień (znika po włączeniu lub po zamknięciu).
   const banner = h("div", {});
   out.push(banner);
   pushBanner(banner);
 
-  // ----- priorytet i wskazówki -----
-  const [first, ...rest] = d.recommendations;
-  if (first) {
-    out.push(card({ icon: recoIcon(first), tone: recoTone(first), title: "Twój priorytet", range: "na dziś", cls: "priority" }, h("div", { class: "reco-title" }, first.title), h("p", { class: "reco-text" }, first.text)));
-  } else {
-    out.push(card({ icon: "sparkles", tone: "orange", title: "Twój priorytet", range: "na dziś", cls: "priority" }, h("div", { class: "reco-title" }, "Jedziesz zgodnie z planem"), h("p", { class: "reco-text" }, "Na razie nie mam żadnych uwag. Trzymaj tak dalej, Janek. 👌")));
-  }
-  if (rest.length) {
-    out.push(card({ icon: "sparkles", tone: "blue", title: "Wskazówki", range: `${rest.length}` }, ...rest.map((r) => h("div", { class: "reco-row" }, badge(recoIcon(r), recoTone(r)), h("div", {}, h("h4", {}, r.title), h("p", {}, r.text))))));
+  // ----- wskazówki (dawny "priorytet" jest teraz pierwszą wskazówką) -----
+  if (d.recommendations.length) {
+    out.push(card({ icon: "sparkles", tone: "blue", title: "Wskazówki", range: `${d.recommendations.length}` }, ...d.recommendations.map((r) => h("div", { class: "reco-row" }, badge(recoIcon(r), recoTone(r)), h("div", {}, h("h4", {}, r.title), h("p", {}, r.text))))));
   }
 
   // ----- kalorie -----

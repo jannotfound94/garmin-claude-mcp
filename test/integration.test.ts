@@ -982,3 +982,100 @@ test("API trasa z opisu: walidacja długości opisu i brak kluczy", async () => 
   assert.equal(noKey.status, 501, "w teście brak ORS_API_KEY");
   assert.match(noKey.body.message, /ORS_API_KEY/);
 });
+
+// ---------------- post przerywany ----------------
+
+test("post przerywany: API, historia, godzina wsteczna, powiadomienia o końcu postu i okna (push i Telegram), bez dubli", async () => {
+  mock.timers.reset(); mock.timers.enable({ apis: ["Date"], now: new Date("2026-12-20T20:00:00Z") }); // 21:00 w Warszawie
+  TOKEN = await issueToken(env);
+  for (const k of ["fast:state", "fast:hist", "push:subs"]) store.delete(k);
+  await state.patchNutCfg({ fastHours: 16, notifyChannel: "app" });
+  pushCalls.length = 0; sent.length = 0; pushStatus = 201;
+  const post = (p: string, body: any = {}) => api(`/api/fasting/${p}`, { method: "POST", body });
+  const HOUR_MS = 3600_000;
+
+  // brak stanu
+  const empty = await api("/api/fasting");
+  assert.equal(empty.status, 200);
+  assert.equal(empty.body.state, null);
+  assert.equal(empty.body.goalHours, 16);
+  assert.equal(empty.body.windowHours, 8);
+  assert.equal((await api("/api/fasting", { token: null })).status, 401);
+
+  // Skończyłem jeść o 20:00 (godzina wsteczna, czas polski): post od 19:00 UTC
+  assert.equal((await post("finish-eating", { at: "25:00" })).status, 400);
+  const started = await post("finish-eating", { at: "20:00" });
+  assert.equal(started.status, 200);
+  assert.equal(started.body.state.phase, "fast");
+  assert.equal(started.body.state.start, Date.parse("2026-12-20T19:00:00Z"));
+  assert.equal(started.body.state.end, Date.parse("2026-12-20T19:00:00Z") + 16 * HOUR_MS);
+  // druga próba w trakcie postu nic nie zmienia
+  assert.equal((await post("finish-eating")).body.state.start, started.body.state.start);
+  // godzina z dzisiaj, wstecz najwyżej 20 h; godzina późniejsza niż teraz to wczoraj, więc zwykle za dawno
+  assert.equal((await post("finish-eating", { at: "06:00", restart: true })).body.state.start, Date.parse("2026-12-20T05:00:00Z"));
+  assert.equal((await post("finish-eating", { at: "22:00", restart: true })).status, 400);
+  await post("finish-eating", { at: "20:00", restart: true });
+
+  // Zaczynam jeść po godzinie: post zapisany jako przerwany, okno 8 h
+  mock.timers.setTime(Date.parse("2026-12-20T20:00:00Z") + HOUR_MS);
+  const early = await post("start-eating");
+  assert.equal(early.body.state.phase, "window");
+  assert.equal(early.body.stats.count, 1);
+  assert.equal(early.body.stats.lastReached, false);
+  assert.equal(early.body.stats.lastHours, 2);
+
+  // Skończyłem jeść teraz: post, który dobiegnie końca sam
+  await post("finish-eating");
+  const run = (await api("/api/fasting")).body.state;
+  assert.equal(run.phase, "fast");
+  assert.equal(run.start, Date.parse("2026-12-20T21:00:00Z"));
+
+  // powiadomienie push o końcu postu: żadne urządzenie nie jest zapisane, więc kanał "app" ratuje się Telegramem (zapas)
+  const sub = await newBrowserSub("https://fcm.googleapis.com/fcm/send/fast");
+  await state.addPushSub({ endpoint: sub.endpoint, p256dh: sub.keys.p256dh, auth: sub.keys.auth, createdAt: "x" });
+  mock.timers.setTime(run.end + 2 * 60_000); // 2 minuty po końcu postu
+  assert.equal((await state.fastTick(true))?.phase, "window");
+  assert.equal(pushCalls.length, 1, "powiadomienie o końcu postu");
+  assert.equal(sent.length, 0, "kanał 'app': bez Telegrama");
+  await state.fastTick(true);
+  assert.equal(pushCalls.length, 1, "bez dubli");
+  const afterFast = (await api("/api/fasting")).body;
+  assert.equal(afterFast.state.phase, "window");
+  assert.equal(afterFast.state.start, run.end, "okno liczy się od planowego końca postu");
+  assert.equal(afterFast.stats.count, 2);
+  assert.equal(afterFast.stats.lastReached, true);
+  assert.equal(afterFast.stats.streak, 1);
+
+  // koniec okna: znów post; tym razem kanał Telegram i treść wiadomości
+  await state.patchNutCfg({ notifyChannel: "telegram" });
+  (state as any).env = { TELEGRAM_BOT_TOKEN: "TT", TELEGRAM_CHAT_ID: "123" };
+  mock.timers.setTime(afterFast.state.end + 60_000);
+  await state.fastTick(true);
+  (state as any).env = {};
+  assert.equal(sent.length, 1);
+  assert.match(sent[0].text, /Okno jedzenia się zamknęło/);
+  assert.equal((await api("/api/fasting")).body.state.phase, "fast");
+
+  // stare przejście (alarm dawno przegapiony): stan nadrobiony, ale bez powiadomienia
+  sent.length = 0; pushCalls.length = 0;
+  const E = (await state.getFast())!.end;
+  mock.timers.setTime(E + 13 * HOUR_MS); // koniec postu 13 h temu, początek kolejnego postu 5 h temu
+  await state.fastTick(true);
+  assert.equal(sent.length + pushCalls.length, 0);
+  assert.ok((await state.getFast())!.end > Date.now());
+
+  // otwarcie aplikacji (GET) nie wysyła powiadomień
+  mock.timers.setTime((await state.getFast())!.end + 60_000);
+  await api("/api/fasting");
+  assert.equal(sent.length + pushCalls.length, 0);
+
+  // ustawienie długości postu: walidacja i wpływ na kolejne fazy
+  assert.equal((await api("/api/settings", { method: "PATCH", body: { fastHours: 9 } })).status, 400);
+  assert.equal((await api("/api/settings", { method: "PATCH", body: { fastHours: 18 } })).body.settings.fastHours, 18);
+  const f18 = await post("finish-eating", { restart: true });
+  assert.equal(f18.body.goalHours, 18);
+  assert.equal(f18.body.windowHours, 6);
+  assert.equal(f18.body.state.end - f18.body.state.start, 18 * HOUR_MS);
+  await state.patchNutCfg({ fastHours: 16, notifyChannel: "both" });
+  mock.timers.reset();
+});
