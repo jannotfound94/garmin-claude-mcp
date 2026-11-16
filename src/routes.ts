@@ -1,8 +1,13 @@
 /**
  * Running loops from OpenRouteService (free key, openrouteservice.org).
- * foot-hiking profile + "green" and "quiet" weightings; several random loops of the target length
- * are generated and the two with the most unpaved surface and greenery are offered.
+ * foot-hiking profile + "green" and "quiet" weightings. Candidates come from two sources:
+ *  - loops routed through parks and unpaved paths found in OpenStreetMap (see parks.ts), and
+ *  - OpenRouteService's own round trips (fallback when there is no park data or too few good loops).
+ * Every candidate is a real routed loop that is measured (length, surface, greenery, out-and-back share);
+ * the two best near the target length are offered.
  */
+
+import { type Anchor, mulberry32, viaCandidates } from "./parks";
 
 const ORS = "https://api.openrouteservice.org";
 
@@ -26,6 +31,8 @@ export interface RouteOption {
   paths_pct: number; // paths, tracks, footways
   green_avg: number; // 0-10, 10 = greenest (converted: ORS reports its green index inverted, see greenness())
   retrace_pct: number; // share of the loop run twice (out-and-back parts); 0 = clean loop
+  source: "parki" | "ors"; // through parks/unpaved paths (own generator) or an OpenRouteService round trip
+  via?: string[]; // names of the parks the loop goes through
   coords: [number, number][]; // [lon, lat]
 }
 
@@ -76,6 +83,7 @@ function weightedAvg(summary: any[] | undefined): number {
 
 async function loop(apiKey: string, start: LatLon, meters: number, seed: number) {
   const res = await fetch(`${ORS}/v2/directions/foot-hiking/geojson`, {
+    signal: AbortSignal.timeout(25000),
     method: "POST",
     headers: { Authorization: apiKey, "Content-Type": "application/json", Accept: "application/geo+json, application/json" },
     body: JSON.stringify({
@@ -89,6 +97,12 @@ async function loop(apiKey: string, start: LatLon, meters: number, seed: number)
       },
     }),
   });
+  return parseRoute(res);
+}
+
+type Measured = Omit<RouteOption, "label" | "source" | "via">;
+
+async function parseRoute(res: Response): Promise<Measured> {
   if (!res.ok) throw new Error(`OpenRouteService ${res.status}: ${(await res.text()).slice(0, 200)}`);
   const j: any = await res.json();
   const f = j.features?.[0];
@@ -106,6 +120,24 @@ async function loop(apiKey: string, start: LatLon, meters: number, seed: number)
     green_avg: Math.round(greenness(ex.green?.summary) * 10) / 10,
     coords: f.geometry.coordinates as [number, number][],
   };
+}
+
+/** A loop start -> anchors -> start, routed on foot-hiking with the same measurements. */
+async function viaRoute(apiKey: string, start: LatLon, pts: Anchor[]) {
+  const coords = [start, ...pts, start].map((p) => [p.lon, p.lat]);
+  const res = await fetch(`${ORS}/v2/directions/foot-hiking/geojson`, {
+    method: "POST",
+    signal: AbortSignal.timeout(25000),
+    headers: { Authorization: apiKey, "Content-Type": "application/json", Accept: "application/geo+json, application/json" },
+    body: JSON.stringify({
+      coordinates: coords,
+      instructions: false,
+      extra_info: ["surface", "waytype", "green"],
+      radiuses: coords.map((_, i) => (i === 0 || i === coords.length - 1 ? 350 : 700)),
+      options: { avoid_features: ["steps"], profile_params: { weightings: { green: 1, quiet: 1 } } },
+    }),
+  });
+  return parseRoute(res);
 }
 
 /** Score: soft surface first, then greenery, then paths; unknown surface on paths counts half. */
@@ -137,9 +169,28 @@ export function retracePct(coords: number[][]): number {
   }
   const inner = pts.filter((p) => p.d > 250 && p.d < dist - 250);
   if (!inner.length) return 0;
+  // Spatial hash (25 m cells): a point is retraced if another point more than 300 m away along the
+  // route lies within 25 m of it. Looking only at the 3x3 neighbouring cells keeps this linear.
+  const grid = new Map<string, number[]>();
+  inner.forEach((p, i) => {
+    const key = `${Math.floor(p.x / 25)},${Math.floor(p.y / 25)}`;
+    (grid.get(key) ?? grid.set(key, []).get(key)!).push(i);
+  });
   let retraced = 0;
   for (const p of inner) {
-    if (inner.some((q) => Math.abs(q.d - p.d) > 300 && Math.abs(q.x - p.x) < 25 && Math.abs(q.y - p.y) < 25 && Math.hypot(q.x - p.x, q.y - p.y) < 25)) retraced++;
+    const cx = Math.floor(p.x / 25);
+    const cy = Math.floor(p.y / 25);
+    let hit = false;
+    for (let dx = -1; dx <= 1 && !hit; dx++)
+      for (let dy = -1; dy <= 1 && !hit; dy++)
+        for (const j of grid.get(`${cx + dx},${cy + dy}`) ?? []) {
+          const q = inner[j];
+          if (Math.abs(q.d - p.d) > 300 && Math.hypot(q.x - p.x, q.y - p.y) < 25) {
+            hit = true;
+            break;
+          }
+        }
+    if (hit) retraced++;
   }
   return Math.round((100 * retraced) / inner.length);
 }
@@ -175,23 +226,69 @@ async function calibratedLoop(apiKey: string, start: LatLon, targetKm: number, s
   return best;
 }
 
-export async function proposeLoops(apiKey: string, start: LatLon, targetKm: number, tries = 6): Promise<RouteOption[]> {
-  const seeds = Array.from({ length: tries }, (_, i) => Math.floor(Math.random() * 1000) + i * 1000);
-  const settled = await Promise.allSettled(seeds.map((s) => calibratedLoop(apiKey, start, targetKm, s)));
-  const ok = settled.filter((r): r is PromiseFulfilledResult<Awaited<ReturnType<typeof loop>>> => r.status === "fulfilled").map((r) => r.value);
-  if (!ok.length) {
-    const err = settled.find((r) => r.status === "rejected") as PromiseRejectedResult | undefined;
-    throw new Error(String(err?.reason ?? "Nie udało się wyznaczyć tras"));
+type Cand = Measured & { source: "parki" | "ors"; via?: string[] };
+
+async function settle<T>(jobs: Promise<T>[]): Promise<{ ok: Awaited<T>[]; firstError?: unknown }> {
+  const r = await Promise.allSettled(jobs);
+  const ok: Awaited<T>[] = [];
+  let firstError: unknown;
+  for (const x of r) {
+    if (x.status === "fulfilled") ok.push(x.value);
+    else firstError ??= x.reason;
   }
+  return { ok, firstError };
+}
+
+const median = (v: number[]) => [...v].sort((a, b) => a - b)[Math.floor(v.length / 2)];
+
+/**
+ * Proposes two loops. With park data (`anchors`) it first routes loops through parks and soft paths:
+ * a first batch assumes streets are 1.35x longer than straight lines, the observed ratio then corrects
+ * a second batch. If fewer than two good loops come out (or there is no park data), OpenRouteService's
+ * own round trips are added. Candidates must be within 10% of the target length.
+ */
+export async function proposeLoops(apiKey: string, start: LatLon, targetKm: number, anchors: Anchor[] = []): Promise<RouteOption[]> {
+  const pool: Cand[] = [];
+  let firstError: unknown;
   const off = (o: { distance_km: number }) => Math.abs(o.distance_km - targetKm) / targetKm;
-  // Only loops within 10% of the target; if fewer than two qualify, take the closest ones by length.
-  // Prefer real loops (at most ~25% run twice) when there are enough of them.
-  const loopsOnly = ok.filter((o) => o.retrace_pct <= 25);
-  const candidates = loopsOnly.length >= 2 ? loopsOnly : ok;
+  const good = () => pool.filter((o) => off(o) <= 0.1 && o.retrace_pct <= 25);
+
+  if (anchors.length >= 3) {
+    const rand = mulberry32(Math.floor(Math.random() * 2 ** 31));
+    const run = async (cands: ReturnType<typeof viaCandidates>) => {
+      const results = await Promise.allSettled(cands.map((c) => viaRoute(apiKey, start, c.pts)));
+      const ratios: number[] = [];
+      results.forEach((r, i) => {
+        if (r.status === "rejected") {
+          firstError ??= r.reason;
+          return;
+        }
+        ratios.push((r.value.distance_km * 1000) / cands[i].estM);
+        const names = cands[i].pts.map((p) => p.name).filter((n): n is string => Boolean(n));
+        pool.push({ ...r.value, source: "parki", ...(names.length ? { via: names } : {}) });
+      });
+      return ratios;
+    };
+    const r1 = await run(viaCandidates(start, anchors, targetKm, 1.35, 6, rand));
+    const f = r1.length ? Math.min(2, Math.max(1.1, median(r1))) : 1.35;
+    await run(viaCandidates(start, anchors, targetKm, f, 5, rand));
+  }
+
+  if (good().length < 2) {
+    const seeds = Array.from({ length: 5 }, (_, i) => Math.floor(Math.random() * 1000) + i * 1000);
+    const { ok, firstError: e } = await settle(seeds.map((s) => calibratedLoop(apiKey, start, targetKm, s)));
+    firstError ??= e;
+    pool.push(...ok.map((o): Cand => ({ ...o, source: "ors" })));
+  }
+  if (!pool.length) throw new Error(String(firstError ?? "Nie udało się wyznaczyć tras"));
+
+  // Prefer real loops within 10% of the target, best score first; otherwise the closest by length.
+  const loopsOnly = pool.filter((o) => o.retrace_pct <= 25);
+  const candidates = loopsOnly.length >= 2 ? loopsOnly : pool;
   const near = candidates.filter((o) => off(o) <= 0.1);
-  const pool = near.length >= 2 ? near.sort((a, b) => score(b) - score(a)) : [...candidates].sort((a, b) => off(a) - off(b));
-  const picked = [pool[0]];
-  const second = pool.slice(1).find((o) => overlap(o.coords, pool[0].coords) < 0.6) ?? pool[1];
+  const ranked = near.length >= 2 ? near.sort((a, b) => score(b) - score(a)) : [...candidates].sort((a, b) => off(a) - off(b));
+  const picked = [ranked[0]];
+  const second = ranked.slice(1).find((o) => overlap(o.coords, ranked[0].coords) < 0.6) ?? ranked[1];
   if (second) picked.push(second);
   return picked.map((o, i) => ({ label: String.fromCharCode(65 + i), ...o }));
 }

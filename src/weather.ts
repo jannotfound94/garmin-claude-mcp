@@ -164,8 +164,8 @@ export function summarize(json: any, windows: string[] = Object.keys(WINDOWS)): 
 
 export async function fetchForecast(lat: number, lon: number, days = 4, windows?: string[]): Promise<DayForecast[]> {
   const q = new URLSearchParams({
-    latitude: lat.toFixed(4),
-    longitude: lon.toFixed(4),
+    latitude: lat.toFixed(2), // ~1 km is plenty for a 2 km weather grid, and reveals less
+    longitude: lon.toFixed(2),
     hourly: "temperature_2m,apparent_temperature,precipitation,precipitation_probability,weather_code,wind_speed_10m,wind_gusts_10m,is_day",
     daily: "sunrise,sunset",
     timezone: "Europe/Warsaw",

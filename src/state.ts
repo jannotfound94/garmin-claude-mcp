@@ -190,6 +190,17 @@ export class CoachState extends DurableObject<Env> {
     else await this.ctx.storage.delete("garminToken");
   }
 
+  // ---------- small time-limited cache (e.g. park data from Overpass) ----------
+
+  /** Values are JSON strings (keeps the RPC types simple). */
+  async getCache(key: string, maxAgeMs: number): Promise<string | null> {
+    const v = await this.ctx.storage.get<{ at: number; data: string }>(`cache:${key}`);
+    return v && Date.now() - v.at < maxAgeMs ? v.data : null;
+  }
+  async setCache(key: string, data: string) {
+    await this.ctx.storage.put(`cache:${key}`, { at: Date.now(), data });
+  }
+
   // ---------- running routes ----------
 
   async getRouteSettings(): Promise<{ home: (LatLon & { label: string }) | null; last: (LatLon & { at: string }) | null; origin: string | null }> {
@@ -205,6 +216,9 @@ export class CoachState extends DurableObject<Env> {
   }
   async setLastLocation(l: LatLon & { at: string }) {
     await this.ctx.storage.put("lastLocation", l);
+  }
+  async clearLastLocation() {
+    await this.ctx.storage.delete("lastLocation");
   }
   async setOrigin(origin: string) {
     if ((await this.ctx.storage.get<string>("origin")) !== origin) await this.ctx.storage.put("origin", origin);
