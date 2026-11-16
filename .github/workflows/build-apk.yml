@@ -49,7 +49,12 @@ jobs:
           distribution: temurin
           java-version: "21"
 
+      # Runner ma już zainstalowane Android SDK. Domyślnie akcja próbuje doinstalować przestarzały pakiet "tools" (błąd
+      # "Failed to find package 'tools'"), więc podajemy pustą listę pakietów: akcja tylko ustawia środowisko i akceptuje licencje,
+      # a brakujące platformy i build-tools Gradle pobierze sam.
       - uses: android-actions/setup-android@v3
+        with:
+          packages: ""
 
       # Stały klucz podpisu: bez niego każdy build miałby inny podpis i Android odmawiałby aktualizacji nad zainstalowaną wersją.
       - name: Restore signing key
