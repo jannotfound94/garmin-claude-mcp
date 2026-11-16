@@ -50,6 +50,19 @@ APK budujemy w chmurze GitHuba, nie na Twoim komputerze. Jest to cienkie opakowa
 
 > **Uczciwie:** workflow budujący APK napisałem i sprawdziłem na tyle, na ile się dało bez Androida (konfiguracja, generowanie projektu, ikony, poprawki manifestu), ale **nie uruchomiłem pełnej kompilacji**. Przy pierwszym uruchomieniu coś może wymagać drobnej poprawki. Jeśli przebieg zrobi się czerwony, wklej mi komunikat błędu z logów, a poprawię.
 
+## Krok 3. Powiadomienia w telefonie (zamiast Telegrama)
+
+Wiadomości trenera (poranny przegląd, podsumowania biegów, wieczorne podsumowanie, odpowiedzi) i przypomnienia o posiłkach z przyciskami „Dodam / Pominąłem / Za godzinę” mogą przychodzić jako powiadomienia z aplikacji. Zasady i godziny są te same co na Telegramie.
+
+1. Otwórz aplikację w **Chrome na telefonie** i zainstaluj ją (menu ⋮ → „Zainstaluj aplikację”). Powiadomienia działają w zainstalowanej aplikacji z Chrome; wersja APK nie jest do tego potrzebna.
+2. Ty → Ustawienia → karta **Powiadomienia i lokalizacja** → „Włącz powiadomienia” i zaakceptuj zgodę. Potem „Wyślij test”: powiadomienie powinno pojawić się po kilku sekundach.
+3. Zostaw kanał **„Aplikacja i Telegram”** na 1–2 tygodnie. Jeśli wszystko dociera, wybierz „Tylko aplikacja”. Serwer nie pozwoli wybrać tej opcji, dopóki żadne urządzenie nie ma włączonych powiadomień.
+4. Dopiero potem możesz przestać używać Telegrama. **Nie usuwaj** sekretów `TELEGRAM_*` ani webhooka od razu: Telegram zostaje kanałem zapasowym. Jeśli powiadomienie do aplikacji nie zostanie dostarczone (np. telefon wygasił subskrypcję), serwer sam wyśle wiadomość na Telegram, więc trener nigdy „nie zamilknie”. Każda wiadomość trenera jest też zawsze zapisana w Ty → Trener.
+
+Lokalizacja: przycisk **„Użyj mojej lokalizacji”** (zakładka Plan lub ta sama karta w ustawieniach) zastępuje udostępnianie lokalizacji na Telegramie. Pogoda i trasy startują wtedy z miejsca, w którym jesteś (przez 3 godziny), w przeciwnym razie z domu. Pliki GPX nadal są linkami w aplikacji.
+
+Jeśli powiadomienia nie przychodzą: sprawdź zgodę (ikona kłódki przy adresie → Powiadomienia), oszczędzanie baterii dla Chrome oraz czy kanał nie jest ustawiony na „Tylko Telegram”.
+
 ## Jak korzystać
 
 - **Dodaj posiłek:** pomarańczowy przycisk ＋ na dole (działa na każdym ekranie). Zdjęcie z aparatu lub z galerii, opis tekstem, godzina (gdy dopisujesz coś z wcześniej). Jeśli Gemini jest chwilowo przeciążony, aplikacja sama ponowi próbę kilka razy.

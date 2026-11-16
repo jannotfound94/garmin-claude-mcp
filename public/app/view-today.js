@@ -1,3 +1,4 @@
+import { pushState, pushSupported } from "./push.js";
 // Widok "Dziś": dashboard z kart. Priorytet dnia, kalorie, tydzień biegowy, trening dziś i jutro, seria zapisów,
 // spalanie z Garmina, regeneracja, waga i źródła danych.
 import { areaChart, ring, weightChart } from "./charts.js";
@@ -22,6 +23,11 @@ export async function viewToday(root) {
   }
   const out = [];
   out.push(header(d.greeting, `${d.now.weekdayPl} ${d.now.date.slice(8)}.${d.now.date.slice(5, 7)} · ${d.now.time}`, iconButton("refresh", "Odśwież", async () => { await getSummary(true).catch(() => {}); rerender(); }), avatarBtn()));
+
+  // Baner zachęcający do włączenia powiadomień (znika po włączeniu lub po zamknięciu).
+  const banner = h("div", {});
+  out.push(banner);
+  pushBanner(banner);
 
   // ----- priorytet i wskazówki -----
   const [first, ...rest] = d.recommendations;
@@ -143,4 +149,18 @@ export async function viewToday(root) {
   );
 
   root.replaceChildren(...out);
+}
+
+const BANNER_KEY = "garda.pushBannerOff";
+async function pushBanner(host) {
+  try {
+    if (localStorage.getItem(BANNER_KEY) || !pushSupported() || (await pushState()) !== "off") return;
+  } catch {
+    return;
+  }
+  const close = () => {
+    try { localStorage.setItem(BANNER_KEY, "1"); } catch { /* nic */ }
+    host.replaceChildren();
+  };
+  host.replaceChildren(card({ icon: "bell", tone: "blue", title: "Powiadomienia" }, h("div", { class: "small muted" }, "Włącz powiadomienia, żeby wiadomości trenera i przypomnienia o posiłkach przychodziły tu, a nie w Telegramie."), h("div", { class: "btns" }, h("button", { class: "btn", onclick: () => (location.hash = "#/ty/ustawienia") }, icon("bell", 17), "Włącz"), h("button", { class: "btn ghost", onclick: close }, "Później"))));
 }

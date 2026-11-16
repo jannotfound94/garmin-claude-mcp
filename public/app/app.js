@@ -2,7 +2,7 @@
 // tekst (textContent), nigdy jako HTML, więc nazwa produktu z "<" czy "&" niczego nie zepsuje ani nie wstrzyknie.
 import { api, auth } from "./api.js";
 import { openAddMeal } from "./meals.js";
-import { errMsg, h, icon, rerender, setRerender, todayLocal } from "./ui.js";
+import { errMsg, h, icon, rerender, setRerender, toast, todayLocal } from "./ui.js";
 import { viewFood } from "./view-food.js";
 import { viewPlan } from "./view-plan.js";
 import { viewToday } from "./view-today.js";
@@ -68,10 +68,26 @@ function render() {
   window.scrollTo(0, 0);
   const run = { dzis: () => viewToday(view), jedzenie: () => viewFood(view), plan: () => viewPlan(view), ty: () => viewYou(view, sub) }[section];
   run().catch((e) => view.replaceChildren(h("div", { class: "card" }, `⚠️ ${errMsg(e)}`)));
+  // Głęboki link z powiadomienia o posiłku: #/jedzenie?add=1 otwiera od razu okno dodawania.
+  if (section === "jedzenie" && /[?&]add=1/.test(location.hash)) {
+    history.replaceState(null, "", "#/jedzenie");
+    openAddMeal({ date: todayLocal(), onSaved: rerender });
+  }
 }
 
 setRerender(render);
 window.addEventListener("hashchange", render);
+if ("serviceWorker" in navigator) {
+  navigator.serviceWorker.addEventListener("message", (ev) => {
+    const m = ev.data || {};
+    if (m.type === "push") toast(`${m.title}: ${m.body}`.slice(0, 160), "info", 7000);
+    if (m.type === "navigate") {
+      const hash = new URL(m.url).hash;
+      if (hash) location.hash = hash;
+      else render();
+    }
+  });
+}
 window.addEventListener("janek:logout", () => {
   document.getElementById("app").replaceChildren(viewLogin("Sesja wygasła. Zaloguj się ponownie."));
 });

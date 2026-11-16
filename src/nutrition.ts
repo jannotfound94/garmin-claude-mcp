@@ -57,6 +57,8 @@ export const DAY_TYPE_PL: Record<DayType, string> = {
   long: "długi bieg",
 };
 
+export type NotifyChannel = "app" | "telegram" | "both";
+
 export interface NutritionConfig {
   slots: Slot[]; // pn-pt (i każdy dzień, gdy weekendSlots puste)
   weekendSlots: Slot[];
@@ -73,6 +75,8 @@ export interface NutritionConfig {
   macroWeightKg: number | null;
   /** Docelowa waga. Gdy nie ma jawnej masy referencyjnej, gramy na kg liczone są od niższej z wagi i celu. */
   goalWeightKg: number | null;
+  /** Którędy trafiają do Janka wiadomości trenera i przypomnienia: aplikacja (push), Telegram albo oba. */
+  notifyChannel: NotifyChannel;
   /** Do kiedy ma być waga docelowa (YYYY-MM-DD), np. start maratonu. Null = bez terminu. */
   goalDate: string | null;
   /**
@@ -94,6 +98,7 @@ export const DEFAULT_CONFIG: NutritionConfig = {
   deficitKcal: 600, // Janek redukuje masę ciała 107 -> 95 kg (patrz TRENER.md); /cel deficyt 0 wyłącza
   macroWeightKg: null,
   goalWeightKg: 95,
+  notifyChannel: "both", // do czasu włączenia powiadomień w aplikacji działa tak, jak dotąd: Telegram
   goalDate: "2027-04-25", // start Energa Gdańsk Maraton
   garminFactor: 0.9,
   weightFallbackKg: null,
