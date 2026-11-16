@@ -113,6 +113,66 @@ export class GarminPersonal {
     };
   }
 
+  /**
+   * Compact recovery picture per day, built from known Garmin fields: what the coach needs in the
+   * morning (sleep, Body Battery, HRV vs. the athlete's own normal range, stress, resting HR).
+   */
+  async readiness(start: string, end: string) {
+    const safe = <T,>(p: Promise<T>) => p.catch(() => null);
+    const [sleep, hrv, daily] = await Promise.all([
+      safe(this.get("/sleep-service/sleep/dailySleepSummariesByDate", { startDate: start, endDate: end })),
+      safe(this.get(`/hrv-service/hrv/daily/${start}/${end}`)),
+      safe(this.get("/usersummary-service/v2/dailysummaries", { startDate: start, endDate: end })),
+    ]);
+    const byDate = new Map<string, Record<string, unknown>>();
+    const day = (d: string) => {
+      if (!byDate.has(d)) byDate.set(d, { data: d });
+      return byDate.get(d)!;
+    };
+    const hhmm = (localMs?: number) => (localMs ? new Date(localMs).toISOString().slice(11, 16) : undefined);
+    const min = (s?: number) => (s != null ? Math.round(s / 60) : undefined);
+
+    for (const s of asArray(sleep)) {
+      if (!s?.calendarDate) continue;
+      day(s.calendarDate).sen = clean({
+        godziny: s.sleepTimeSeconds != null ? Math.round(s.sleepTimeSeconds / 360) / 10 : undefined,
+        od: hhmm(s.sleepStartTimestampLocal),
+        do: hhmm(s.sleepEndTimestampLocal),
+        ocena: s.sleepScores?.overall?.value,
+        ocena_slownie: s.sleepScores?.overall?.qualifierKey,
+        gleboki_min: min(s.deepSleepSeconds),
+        rem_min: min(s.remSleepSeconds),
+        przebudzenia: s.awakeCount,
+        drzemka_min: s.napTimeSeconds ? min(s.napTimeSeconds) : undefined,
+        komentarz_garmina: s.sleepScoreFeedback,
+      });
+    }
+    for (const h of asArray((hrv as any)?.hrvSummaries ?? hrv)) {
+      if (!h?.calendarDate) continue;
+      day(h.calendarDate).hrv = clean({
+        ostatnia_noc: h.lastNightAvg,
+        srednia_tygodniowa: h.weeklyAvg,
+        twoja_norma: h.baseline ? `${h.baseline.balancedLow}-${h.baseline.balancedUpper}` : undefined,
+        status: h.status,
+      });
+    }
+    for (const d of asArray((daily as any)?.data ?? daily)) {
+      if (!d?.calendarDate) continue;
+      const t = day(d.calendarDate);
+      t.body_battery = clean({
+        szczyt_po_nocy: d.bodyBattery?.maxValue,
+        najnizej: d.bodyBattery?.minValue,
+        teraz: d.bodyBattery?.latestValue,
+        naladowano: d.bodyBattery?.chargedValue,
+        zuzyto: d.bodyBattery?.drainedValue,
+      });
+      t.tetno_spoczynkowe = d.heartRate?.restingValue;
+      t.stres_sredni = d.stress?.avgLevel;
+      t.kroki = d.movement?.steps?.value;
+    }
+    return [...byDate.values()].sort((a, b) => String(a.data).localeCompare(String(b.data))).map(clean);
+  }
+
   /** VO2max over the last weeks and fitness age. */
   async fitness(start: string, end: string) {
     const safe = (p: Promise<unknown>) => p.then(prune).catch((e) => ({ error: String(e).slice(0, 200) }));
@@ -128,6 +188,16 @@ export class GarminPersonal {
 function budget(v: unknown, max = 2500): unknown {
   const s = JSON.stringify(v);
   return s && s.length > max ? `${s.slice(0, max)}… [obcięto]` : v;
+}
+
+function asArray(v: unknown): any[] {
+  return Array.isArray(v) ? v : [];
+}
+
+function clean(o: Record<string, unknown>) {
+  return Object.fromEntries(
+    Object.entries(o).filter(([, v]) => v !== undefined && v !== null && !(typeof v === "object" && !Array.isArray(v) && Object.keys(v as object).length === 0)),
+  );
 }
 
 /** Caps a JSON payload so one tool result cannot flood the coach's context. */

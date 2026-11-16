@@ -150,13 +150,18 @@ export class MyMCP extends McpAgent<Env> {
 
     this.server.tool(
       "getGarminRecovery",
-      "Official Garmin Connect Personal API: sleep (incl. sleep score/phases), HRV status, stress, Body Battery and daily summary per day. Data intervals.icu does not fully have.",
-      { days: z.number().optional().describe("How many days back including today, default 3, max 14") },
-      async ({ days = 3 }) => {
+      "Official Garmin Connect Personal API, per day: sleep (hours, times, score, deep/REM), Body Battery (peak after the night, now), HRV vs. Jan's own normal range, resting HR, stress. details: true adds the raw (pruned) Garmin data.",
+      {
+        days: z.number().optional().describe("How many days back including today, default 7, max 14"),
+        details: z.boolean().optional().describe("Also return raw Garmin sections (large). Default false."),
+      },
+      async ({ days = 7, details = false }) => {
         const g = garminClient(this.env);
         if (!g) return text(NO_GARMIN);
         const n = Math.min(Math.max(days, 1), 14);
-        return text(capJson(await g.recovery(addDays(today(), -(n - 1)), today())));
+        const start = addDays(today(), -(n - 1));
+        const summary = await g.readiness(start, today());
+        return text(capJson(details ? { podsumowanie: summary, szczegoly: await g.recovery(start, today()) } : summary));
       },
     );
 
@@ -188,7 +193,7 @@ export class MyMCP extends McpAgent<Env> {
           icu.activities(addDays(local.date, -14)),
           icu.events(addDays(local.date, -7), addDays(local.date, 14)),
           icu.wellness(addDays(local.date, -7)),
-          g ? g.recovery(addDays(local.date, -1), local.date) : Promise.resolve(NO_GARMIN),
+          g ? g.readiness(addDays(local.date, -6), local.date) : Promise.resolve(NO_GARMIN),
         ]);
         const val = <T,>(r: PromiseSettledResult<T>, f: (x: T) => unknown) =>
           r.status === "fulfilled" ? f(r.value) : { error: String(r.reason) };
@@ -203,6 +208,11 @@ export class MyMCP extends McpAgent<Env> {
             otwarte_sprawy: mem.openItems,
             zaplanowane_sprawdzenia: mem.checkIns.map((c) => ({ id: c.id, kiedy: fmtWarsaw(c.at), powod: c.reason })),
             omowione_biegi: mem.reviewedActivities.slice(-15),
+            biegi_bez_podsumowania: val(acts, (list: any[]) =>
+              list
+                .filter((x) => /Run/i.test(x.type) && String(x.start_date_local) >= "2026-11-01" && !mem.reviewedActivities.includes(String(x.id)))
+                .map((x) => compactActivity(x)),
+            ),
           },
           rozmowa: mem.conversation.slice(-30).map((m) => ({
             kiedy: fmtWarsaw(m.at),
@@ -214,10 +224,7 @@ export class MyMCP extends McpAgent<Env> {
             biegi_14_dni: val(acts, (a: any[]) => a.map(compactActivity)),
             kalendarz_od_minus7_do_plus14: val(events, (e: any[]) => e.map(compactEvent)),
             samopoczucie_7_dni: val(well, (w: any[]) => w.map(compactWellness)),
-            garmin_connect_wczoraj_i_dzis: val(garminToday, (x) => {
-              const json = capJson(x, 8000);
-              return json.includes("[obcięto") ? json : x;
-            }),
+            garmin_regeneracja_7_dni: val(garminToday, (x) => x),
           },
           telegram_skonfigurowany: Boolean(this.env.TELEGRAM_BOT_TOKEN && this.env.TELEGRAM_CHAT_ID),
         });

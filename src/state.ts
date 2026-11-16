@@ -36,6 +36,7 @@ export interface CoachMemory {
   conversation: Msg[];
   lastHandledAt: string | null;
   knownActivities: string[];
+  activitiesSeeded?: boolean;
   reviewedActivities: string[];
   pulses: Record<string, string>; // pulse name -> local date it last fired
   pending: string[]; // wake reasons waiting to be sent
@@ -68,6 +69,7 @@ function empty(): CoachMemory {
     conversation: [],
     lastHandledAt: null,
     knownActivities: [],
+    activitiesSeeded: false,
     reviewedActivities: [],
     pulses: {},
     pending: [],
@@ -129,6 +131,7 @@ export class CoachState extends DurableObject<Env> {
   async setKnownActivities(ids: string[]) {
     const m = await this.load();
     m.knownActivities = ids.slice(-MAX_IDS);
+    m.activitiesSeeded = true;
     await this.save(m);
   }
 
