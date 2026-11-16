@@ -1,6 +1,7 @@
 import { DurableObject } from "cloudflare:workers";
 import { fmtWarsaw } from "./time";
 import type { GarminToken } from "./garmin";
+import type { LatLon, RouteProposal } from "./routes";
 
 /**
  * The coach's memory. One Durable Object instance ("jan") holds everything, so updates from the
@@ -36,6 +37,7 @@ export interface CoachMemory {
   conversation: Msg[];
   lastHandledAt: string | null;
   knownActivities: string[];
+  activitiesSeeded?: boolean;
   reviewedActivities: string[];
   pulses: Record<string, string>; // pulse name -> local date it last fired
   pending: string[]; // wake reasons waiting to be sent
@@ -68,6 +70,7 @@ function empty(): CoachMemory {
     conversation: [],
     lastHandledAt: null,
     knownActivities: [],
+    activitiesSeeded: false,
     reviewedActivities: [],
     pulses: {},
     pending: [],
@@ -129,6 +132,7 @@ export class CoachState extends DurableObject<Env> {
   async setKnownActivities(ids: string[]) {
     const m = await this.load();
     m.knownActivities = ids.slice(-MAX_IDS);
+    m.activitiesSeeded = true;
     await this.save(m);
   }
 
@@ -184,6 +188,44 @@ export class CoachState extends DurableObject<Env> {
   async setGarminToken(t: GarminToken | null) {
     if (t) await this.ctx.storage.put("garminToken", t);
     else await this.ctx.storage.delete("garminToken");
+  }
+
+  // ---------- running routes ----------
+
+  async getRouteSettings(): Promise<{ home: (LatLon & { label: string }) | null; last: (LatLon & { at: string }) | null; origin: string | null }> {
+    const [home, last, origin] = await Promise.all([
+      this.ctx.storage.get<LatLon & { label: string }>("home"),
+      this.ctx.storage.get<LatLon & { at: string }>("lastLocation"),
+      this.ctx.storage.get<string>("origin"),
+    ]);
+    return { home: home ?? null, last: last ?? null, origin: origin ?? null };
+  }
+  async setHome(h: LatLon & { label: string }) {
+    await this.ctx.storage.put("home", h);
+  }
+  async setLastLocation(l: LatLon & { at: string }) {
+    await this.ctx.storage.put("lastLocation", l);
+  }
+  async setOrigin(origin: string) {
+    if ((await this.ctx.storage.get<string>("origin")) !== origin) await this.ctx.storage.put("origin", origin);
+  }
+  async saveProposal(p: RouteProposal) {
+    const list = (await this.ctx.storage.get<RouteProposal[]>("proposals")) ?? [];
+    list.push(p);
+    await this.ctx.storage.put("proposals", list.slice(-6));
+  }
+  async getProposal(id: string): Promise<RouteProposal | null> {
+    const list = (await this.ctx.storage.get<RouteProposal[]>("proposals")) ?? [];
+    return list.find((p) => p.id === id) ?? null;
+  }
+  async listProposals(): Promise<RouteProposal[]> {
+    return (await this.ctx.storage.get<RouteProposal[]>("proposals")) ?? [];
+  }
+  async markChosen(id: string, label: string) {
+    const list = (await this.ctx.storage.get<RouteProposal[]>("proposals")) ?? [];
+    const p = list.find((x) => x.id === id);
+    if (p) p.chosen = label;
+    await this.ctx.storage.put("proposals", list);
   }
 
   /** Manual wake-up from the setup page. */

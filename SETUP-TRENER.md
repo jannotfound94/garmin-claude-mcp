@@ -128,6 +128,16 @@ Zadanie już istnieje. Trzeba mu dać dostęp do danych i „dzwonek”, którym
 
 Klucz jest ważny rok. Po roku utwórz nowy w Garmin Connect i podmień wartość w Cloudflare.
 
+## Krok 6b. Trasy biegowe (OpenRouteService)
+
+1. Wejdź na https://openrouteservice.org, kliknij **Sign up** (darmowe konto), a po zalogowaniu w panelu (Dashboard) skopiuj swój klucz API (token).
+2. W Cloudflare (**Compute (Workers)** → **garmin-claude-mcp** → **Settings** → **Variables and Secrets** → **+ Add**) dodaj:
+   - **Type:** Secret, **Variable name:** `ORS_API_KEY`, **Value:** klucz. Kliknij **Deploy**.
+3. Na stronie `/setup`, w sekcji **Trasy**, wpisz adres startu (np. dom) i kliknij **Zapisz punkt startu**. Adres jest zapisywany tylko na Twoim serwerze (nie w repozytorium).
+4. Kliknij **Wygeneruj testowe trasy 5 km** i otwórz linki do map.
+
+Gdy chcesz wystartować z innego miejsca, udostępnij trenerowi lokalizację w Telegramie (spinacz → Lokalizacja). Przez 3 godziny trasy będą startować stamtąd.
+
 ## Krok 7. Wyłączenie starych zadań
 
 Gdy w kroku 5 wszystko zadziałało, napisz do Claude: „wyłącz stare zadania trenera”. Dotychczasowe 9 zadań („Trener: poranna motywacja…” itd.) zostanie wyłączonych, ale nie usuniętych. Po podłączeniu Telegrama do serwera stare zadania i tak nie odczytają już Twoich wiadomości.

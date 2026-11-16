@@ -30,8 +30,10 @@ export async function runScheduler(env: Env) {
     const mem = await state.getMemory();
     const ids = acts.map((a: any) => String(a.id));
     const fresh = acts.filter((a: any) => !mem.knownActivities.includes(String(a.id)));
-    if (mem.knownActivities.length === 0) {
-      // First run ever: remember what exists, don't announce old runs.
+    if (!mem.activitiesSeeded) {
+      // First run ever: remember what exists (possibly nothing), don't announce old runs.
+      // A separate flag is needed: with no runs in the window the list stays empty, and an
+      // empty list must not mean "not seeded yet", or the next new run is swallowed silently.
       await state.setKnownActivities(ids);
     } else if (fresh.length) {
       await state.setKnownActivities([...mem.knownActivities, ...fresh.map((a: any) => String(a.id))]);
