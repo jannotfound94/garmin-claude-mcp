@@ -24,7 +24,7 @@ export interface RouteOption {
   paved_pct: number;
   unknown_surface_pct: number;
   paths_pct: number; // paths, tracks, footways
-  green_avg: number; // 0-10
+  green_avg: number; // 0-10, 10 = greenest (converted: ORS reports its green index inverted, see greenness())
   retrace_pct: number; // share of the loop run twice (out-and-back parts); 0 = clean loop
   coords: [number, number][]; // [lon, lat]
 }
@@ -53,6 +53,19 @@ export async function geocode(apiKey: string, text: string): Promise<LatLon & { 
 function summaryPct(summary: any[] | undefined, pick: (v: number) => boolean): number {
   if (!Array.isArray(summary)) return 0;
   return summary.filter((s) => pick(Number(s.value))).reduce((a, s) => a + Number(s.amount ?? 0), 0);
+}
+
+/**
+ * ORS' documentation says the "green" extra runs from 0 (little green) to 10 (a lot of green).
+ * Its source says otherwise: the underlying level comes from an "ungreen factor" (higher = less green;
+ * the green weighting penalises high levels) and is reported to clients as 3..10. A route through dense
+ * city streets therefore shows ~10, which is how a 10/10 "greenery" came out for a street route.
+ * Convert to a 0-10 score where 10 really is greenest.
+ */
+function greenness(summary: any[] | undefined): number {
+  const ungreen = weightedAvg(summary); // 3 (greenest) .. 10 (least green)
+  if (!ungreen) return 0;
+  return Math.max(0, Math.min(10, ((10 - ungreen) / 7) * 10));
 }
 
 function weightedAvg(summary: any[] | undefined): number {
@@ -90,7 +103,7 @@ async function loop(apiKey: string, start: LatLon, meters: number, seed: number)
     unknown_surface_pct: Math.max(0, Math.round(100 - unpaved - paved)),
     paths_pct: Math.round(summaryPct(ex.waytype?.summary, (v) => PATHS.has(v))),
     retrace_pct: retracePct(f.geometry.coordinates),
-    green_avg: Math.round(weightedAvg(ex.green?.summary) * 10) / 10,
+    green_avg: Math.round(greenness(ex.green?.summary) * 10) / 10,
     coords: f.geometry.coordinates as [number, number][],
   };
 }
