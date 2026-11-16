@@ -2,11 +2,12 @@
  * Rozpoznawanie posiłków przez Gemini (darmowy klucz z Google AI Studio). Model tylko rozpoznaje składniki
  * i szacuje gramaturę/makro; sumy, cele i bilans liczy kod (nutrition.ts), nie model.
  */
-import { type FoodItem, normalizeItem, validHhmm, normHhmm } from "./nutrition";
+import { type FoodItem, normalizeItem, normHhmm, slotKey, validHhmm } from "./nutrition";
 
 const API = "https://generativelanguage.googleapis.com/v1beta/models";
 const BUDGET_MS = 22_000;
 const MIN_ATTEMPT_MS = 4_000;
+const ATTEMPT_CAP_MS = 12_000; // pojedyncza próba niebędąca ostatnią: zostaw czas na model zapasowy
 export const DEFAULT_MODEL = "gemini-3.5-flash";
 export const DEFAULT_FALLBACK_MODEL = "gemini-3.5-flash-lite";
 
@@ -19,6 +20,8 @@ export interface MealAnalysis {
   barcode: string | null;
   question: string | null;
   comment: string | null;
+  /** Okno z planu posiłków, jeśli Jan wyraźnie napisał, który to posiłek (dokładnie jedna z podanych nazw). */
+  slot: string | null;
   model: string;
 }
 
@@ -28,6 +31,8 @@ export interface AnalyzeInput {
   /** Poprawka istniejącego posiłku: model dostaje poprzednią wersję i uwagę Jana. */
   previous?: { label: string; note: string; items: FoodItem[] };
   nowLocal: { date: string; time: string };
+  /** Nazwy posiłków z planu Jana (np. śniadanie, obiad); model może wskazać jedną, gdy Jan sam to napisze. */
+  slotNames?: string[];
 }
 
 const SYSTEM = `Jesteś dietetykiem sportowym, który liczy kalorie i makroskładniki posiłków biegacza (kuchnia polska, typowe polskie porcje i produkty).
@@ -42,6 +47,7 @@ Zasady:
 8. "eaten_time" (HH:MM) i "day_offset" (0 lub -1 dla "wczoraj") tylko wtedy, gdy Jan wyraźnie napisał, kiedy jadł. Inaczej null.
 9. Jeśli na zdjęciu nie ma jedzenia ani napoju, ustaw is_food=false i items=[].
 10. "meal_label": krótka nazwa dania (np. "owsianka z bananem i orzechami"). "comment": opcjonalnie jedno zdanie istotnej uwagi, inaczej null.
+11. "meal_slot": gdy podano plan posiłków Jana i Jan wyraźnie napisał, który to był posiłek ("to było moje śniadanie", "na kolację"), wpisz dokładnie jedną nazwę z planu. Inaczej null. Nie zgaduj z godziny ani z zawartości talerza.
 Zwracasz wyłącznie JSON zgodny ze schematem.`;
 
 const N = (extra: Record<string, unknown> = {}) => ({ type: "NUMBER", ...extra });
@@ -51,6 +57,7 @@ const SCHEMA = {
     is_food: { type: "BOOLEAN" },
     meal_label: { type: "STRING" },
     eaten_time: { type: "STRING", nullable: true },
+    meal_slot: { type: "STRING", nullable: true },
     day_offset: { type: "INTEGER", nullable: true },
     items: {
       type: "ARRAY",
@@ -99,6 +106,7 @@ function userText(input: AnalyzeInput): string {
   } else if (input.image) {
     lines.push("Jan nie dodał notatki.");
   }
+  if (input.slotNames?.length) lines.push(`Plan posiłków Jana (dozwolone wartości meal_slot): ${input.slotNames.join(", ")}.`);
   if (!input.image) lines.push("Brak zdjęcia: policz posiłek wyłącznie z opisu Jana.");
   return lines.join("\n");
 }
@@ -137,13 +145,22 @@ class GeminiHttpError extends Error {
 }
 
 async function callModel(apiKey: string, model: string, body: unknown, timeoutMs: number): Promise<any> {
-  const res = await fetch(`${API}/${encodeURIComponent(model)}:generateContent`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", "x-goog-api-key": apiKey },
-    body: JSON.stringify(body),
-    signal: AbortSignal.timeout(timeoutMs),
-  });
-  const text = await res.text();
+  let res: Response;
+  let text: string;
+  try {
+    res = await fetch(`${API}/${encodeURIComponent(model)}:generateContent`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-goog-api-key": apiKey },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    text = await res.text();
+  } catch (e) {
+    if (e instanceof Error && (e.name === "TimeoutError" || e.name === "AbortError")) {
+      throw new GeminiHttpError(0, `Gemini ${model}: brak odpowiedzi w ciągu ${Math.round(timeoutMs / 1000)} s`);
+    }
+    throw e;
+  }
   if (!res.ok) throw new GeminiHttpError(res.status, `Gemini ${model} ${res.status}: ${text.slice(0, 240)}`);
   try {
     return JSON.parse(text);
@@ -153,7 +170,7 @@ async function callModel(apiKey: string, model: string, body: unknown, timeoutMs
 }
 
 /** Parsuje odpowiedź API do MealAnalysis; rzuca, gdy model nic sensownego nie zwrócił. */
-export function parseAnalysis(resp: any, model: string): MealAnalysis {
+export function parseAnalysis(resp: any, model: string, slotNames: string[] = []): MealAnalysis {
   const cand = resp?.candidates?.[0];
   const textOut = (cand?.content?.parts ?? [])
     .filter((p: any) => typeof p?.text === "string" && !p.thought)
@@ -182,6 +199,8 @@ export function parseAnalysis(resp: any, model: string): MealAnalysis {
     barcode,
     question: str(j.question),
     comment: str(j.comment),
+    // Tylko dokładna nazwa z planu (porównanie bez diakrytyków i wielkości liter); nic spoza planu.
+    slot: (typeof j.meal_slot === "string" && slotNames.find((n) => slotKey(n) === slotKey(j.meal_slot))) || null,
     model,
   };
 }
@@ -194,13 +213,14 @@ export async function analyzeMeal(env: Env, input: AnalyzeInput): Promise<MealAn
   // Praca w tle po odpowiedzi do Telegrama (waitUntil) ma w Cloudflare ok. 30 s. Wspólny budżet czasu dla wszystkich
   // prób gwarantuje, że błąd zdąży dojść do Jana zamiast zostać ucięty razem z procesem.
   const deadline = Date.now() + BUDGET_MS;
-  for (const model of models) {
+  for (const [mi, model] of models.entries()) {
+    const isLast = mi === models.length - 1;
     for (const thinking of THINKING_VARIANTS) {
       const left = deadline - Date.now();
       if (left < MIN_ATTEMPT_MS) throw fail();
       try {
-        const resp = await callModel(env.GEMINI_API_KEY, model, buildBody(input, thinking), left);
-        return parseAnalysis(resp, model);
+        const resp = await callModel(env.GEMINI_API_KEY, model, buildBody(input, thinking), isLast ? left : Math.min(left, ATTEMPT_CAP_MS));
+        return parseAnalysis(resp, model, input.slotNames);
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         // 400 przy ustawieniu myślenia = model go zwykle nie obsługuje: ten sam model, następny wariant
