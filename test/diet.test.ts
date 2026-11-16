@@ -258,3 +258,34 @@ test("analyzeMeal: timeout on primary falls back to the second model; message in
     await assert.rejects(analyzeMeal({ GEMINI_API_KEY: "k" } as any, input), (e: Error) => /brak odpowiedzi w ciągu/.test(e.message) && !/aborted/.test(e.message));
   } finally { globalThis.fetch = orig; }
 });
+
+test("targets from quiet-day baseline: planned run added, actual Garmin effort raises the target", () => {
+  const base = { kcal: 3500, source: "garmin" as const, detail: { days: 14, resting: 2500, active: 1500, quietActive: 400, min: 2700, max: 5500 } };
+  const quietActive = 0.85 * 400; // 340
+  const C = { ...DEFAULT_CONFIG, deficitKcal: 0, macroWeightKg: null };
+  const rest = computeTargets(C, 100, "rest", base)!;
+  assert.ok(Math.abs(rest.kcal - (2500 + quietActive)) <= 3, String(rest.kcal)); // 2840
+  const easy = computeTargets(C, 100, "easy", base, { runKm: 5 })!; // + 0.9*100*5 = 450
+  assert.ok(Math.abs(easy.kcal - (2500 + quietActive + 450)) <= 3, String(easy.kcal));
+  const long = computeTargets(C, 100, "long", base, { runKm: 20 })!; // + 1800
+  assert.ok(Math.abs(long.kcal - (2500 + quietActive + 1800)) <= 3, String(long.kcal));
+  // bez dystansu: domyślny km dla typu dnia (easy 6)
+  assert.ok(Math.abs(computeTargets(C, 100, "easy", base)!.kcal - (2500 + quietActive + 540)) <= 3);
+  // niezaplanowany wysiłek: Garmin pokazuje dziś 2000 aktywnych kcal na dzień bez biegu -> cel = 2500 + 0.85*2000
+  const hike = computeTargets(C, 100, "rest", base, { activeTodayKcal: 2000 })!;
+  assert.ok(Math.abs(hike.kcal - (2500 + 1700)) <= 3, String(hike.kcal));
+  assert.match(hike.note!, /Garmin pokazuje dziś większy wysiłek/);
+  // mały wysiłek dzisiaj (cząstkowy dzień) nie obniża celu poniżej planu
+  assert.ok(Math.abs(computeTargets(C, 100, "easy", base, { runKm: 5, activeTodayKcal: 100 })!.kcal - (2500 + quietActive + 450)) <= 3);
+  // deficyt tylko dni bez biegu i łatwe
+  const D = { ...C, deficitKcal: 300 }; // przy 500 podłoga węglowodanów (2 g/kg) ograniczyłaby deficyt
+  assert.ok(Math.abs(computeTargets(D, 100, "rest", base)!.kcal - (2840 - 300)) <= 3);
+  assert.equal(computeTargets(D, 100, "rest", base)!.deficitApplied, 300);
+  assert.ok(Math.abs(computeTargets(D, 100, "long", base, { runKm: 20 })!.kcal - (2500 + quietActive + 1800)) <= 3);
+});
+
+test("classifyDay reports distance (larger of plan and done)", () => {
+  assert.equal(classifyDay([{ type: "Run", category: "WORKOUT", name: "Bieg 5 km", distance: 5000 }], []).km, 5);
+  assert.equal(classifyDay([{ type: "Run", category: "WORKOUT", name: "Bieg 5 km", distance: 5000 }], [{ type: "Run", distance: 8200 }]).km, 8.2);
+  assert.equal(classifyDay([], []).km, 0);
+});

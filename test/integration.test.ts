@@ -297,15 +297,14 @@ test("Garmin energy base is a median (outlier day ignored), /spalanie shows days
   await send({ message: { chat, date: now(), text: "/cel" } });
   const cel = lastText();
   assert.doesNotMatch(cel, /3870/);
-  assert.match(cel, /mediany spalania z Garmina/);
-  assert.match(cel, new RegExp(`ok\\. ${Math.round(2500 + 0.85 * 500)} kcal`)); // 2925, a średnia byłaby ~4000
-  assert.match(cel, /14 dni: spoczynkowe 2500 \+ aktywne 500/);
+  assert.match(cel, /Kcal od spokojnego dnia z Garmina: spoczynkowe 2500 \+ lekka aktywność 425/); // 500 aktywnych z najspokojniejszych dni ×0,85; dzień 20000 nie ma wpływu
+  assert.match(cel, /dzień bez biegu \(ok\. 0 km\)|dzień bez biegu:/);
   await send({ message: { chat, date: now(), text: "/spalanie" } });
   const burn = lastText();
   assert.equal(sent[sent.length - 1].parse_mode, "HTML");
   assert.match(burn, /11-15: <b>22500<\/b> = 2500 \+ 20000/);
-  assert.match(burn, /Baza do celów \(mediana, aktywne ×0,85\): <b>2925<\/b> kcal/);
-  assert.match(burn, /Najspokojniejsze dni \(3 najniższe\): ok\. 2925 kcal, najbardziej aktywne: 19500 kcal/);
+  assert.match(burn, /Spokojny dzień \(baza celów\): <b>2500 \+ 425 = 2925<\/b> kcal/);
+  assert.match(burn, /najbardziej aktywny: 19500 kcal/);
   env.GARMIN_PERSONAL_API_KEY = undefined;
   mock.timers.reset();
 });

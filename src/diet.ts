@@ -10,6 +10,9 @@ import {
   DAY_TYPE_PL,
   type DayType,
   type EnergyBase,
+  GARMIN_ACTIVE_HAIRCUT,
+  RUN_KCAL_PER_KG_KM,
+  DEFAULT_RUN_KM,
   type Macros,
   type Meal,
   type NutritionConfig,
@@ -65,11 +68,10 @@ export interface DayInfo {
   weightKg: number | null;
   targets: Targets | null;
   base: EnergyBase | null;
+  runKm: number | null;
+  activeTodayKcal: number | null;
   cfg: NutritionConfig;
 }
-
-/** Gramy aktywnych kalorii Garmina liczone z tym współczynnikiem: bywają zawyżone o 10–30%. */
-const GARMIN_ACTIVE_HAIRCUT = 0.85;
 
 function median(xs: number[]): number {
   const v = [...xs].sort((a, b) => a - b);
@@ -93,7 +95,7 @@ export async function energyBase(env: Env, today: string): Promise<EnergyBase | 
   if (cal.ready) return { kcal: cal.tdeeKcal, source: "kalibracja" };
 
   // Klucz z wersją: zmiana sposobu liczenia nie może zwracać starej wartości z pamięci podręcznej.
-  const cached = await st.getCache(`energybase:v2:${today}`, 6 * 3600_000);
+  const cached = await st.getCache(`energybase:v3:${today}`, 6 * 3600_000);
   if (cached) {
     const c = JSON.parse(cached) as EnergyBase;
     if (c.source !== "garmin" || c.detail) return c;
@@ -109,9 +111,17 @@ export async function energyBase(env: Env, today: string): Promise<EnergyBase | 
   const base: EnergyBase = {
     kcal: r0(median(day)),
     source: "garmin",
-    detail: { days: rows.length, resting: r0(median(rows.map((e) => e.resting!))), active: r0(median(rows.map((e) => e.active!))), min: r0(Math.min(...day)), max: r0(Math.max(...day)) },
+    detail: {
+      days: rows.length,
+      resting: r0(median(rows.map((e) => e.resting!))),
+      active: r0(median(rows.map((e) => e.active!))),
+      // Spokojny dzień: mediana aktywnych kcal z ok. jednej trzeciej dni z najmniejszym wysiłkiem (min. 3).
+      quietActive: r0(median([...rows].sort((a, b) => a.active! - b.active!).slice(0, Math.max(3, Math.round(rows.length / 3))).map((e) => e.active!))),
+      min: r0(Math.min(...day)),
+      max: r0(Math.max(...day)),
+    },
   };
-  await st.setCache(`energybase:v2:${today}`, JSON.stringify(base));
+  await st.setCache(`energybase:v3:${today}`, JSON.stringify(base));
   return base;
 }
 
@@ -120,7 +130,7 @@ export async function dayInfo(env: Env, date: string): Promise<DayInfo> {
   const st = coach(env);
   const [cfg, weights] = await Promise.all([st.getNutCfg(), st.getWeights()]);
   const weightKg = weightStats(weights, date).last?.kg ?? cfg.weightFallbackKg;
-  let cls: { type: DayType; why: string } | null = null;
+  let cls: { type: DayType; why: string; km?: number } | null = null;
   const cached = await st.getCache(`daytype:${date}`, 20 * 60_000);
   if (cached) cls = JSON.parse(cached);
   else {
@@ -134,9 +144,35 @@ export async function dayInfo(env: Env, date: string): Promise<DayInfo> {
       cls = { type: "easy", why: `brak danych z intervals.icu (${String(e).slice(0, 60)}), przyjęto łatwy dzień` };
     }
   }
-  // Garmin nie ma własnego limitu czasu, a siedzimy w budżecie ~30 s pracy w tle: po 6 s cele liczą się z g/kg.
-  const base = await Promise.race([energyBase(env, date), new Promise<null>((r) => setTimeout(() => r(null), 6000))]).catch(() => null);
-  return { date, dayType: cls!.type, dayTypeWhy: cls!.why, weightKg, targets: computeTargets(cfg, weightKg, cls!.type, base), base, cfg };
+  // Garmin nie ma własnego limitu czasu, a siedzimy w budżecie ~30 s pracy w tle: po 6 s cele liczą się bez niego.
+  const timeout = <T,>(p: Promise<T>) => Promise.race([p, new Promise<null>((r) => setTimeout(() => r(null), 6000))]).catch(() => null);
+  const base = await timeout(energyBase(env, date));
+  // Dzisiejsze aktywne kcal z Garmina (cząstkowe do końca dnia): gdy przekraczają plan, cel rośnie do faktycznego spalania.
+  const activeTodayKcal = base?.source === "garmin" && date === warsaw().date ? await timeout(activeToday(env, date)) : null;
+  const runKm = cls!.km ?? null;
+  return {
+    date,
+    dayType: cls!.type,
+    dayTypeWhy: cls!.why,
+    weightKg,
+    targets: computeTargets(cfg, weightKg, cls!.type, base, { runKm, activeTodayKcal }),
+    base,
+    runKm,
+    activeTodayKcal,
+    cfg,
+  };
+}
+
+/** Aktywne kcal Garmina z dzisiejszego dnia do tej pory (pamięć podręczna 10 min). */
+async function activeToday(env: Env, date: string): Promise<number | null> {
+  const st = coach(env);
+  const cached = await st.getCache(`activetoday:${date}`, 10 * 60_000);
+  if (cached) return JSON.parse(cached) as number | null;
+  const g = garminClient(env);
+  if (!g) return null;
+  const v = (await g.energy(date, date))[date]?.active ?? null;
+  if (v != null) await st.setCache(`activetoday:${date}`, JSON.stringify(v));
+  return v;
 }
 
 const pl = (n: number) => String(n).replace(".", ",");
@@ -509,14 +545,15 @@ async function cmdGoals(env: Env, arg: string) {
   const base = await energyBase(env, warsaw().date).catch(() => null);
   lines.push(
     base
-      ? `Kcal z ${base.source === "kalibracja" ? "kalibracji (waga i spożycie)" : "mediany spalania z Garmina (kalorie aktywne ×0,85)"}: ok. ${base.kcal} kcal na przeciętny dzień` +
-        (base.detail ? `\n   ${base.detail.days} dni: spoczynkowe ${base.detail.resting} + aktywne ${base.detail.active} (zakres dni ${base.detail.min}–${base.detail.max}). Szczegóły: /spalanie` : "")
+      ? base.detail
+        ? `Kcal od spokojnego dnia z Garmina: spoczynkowe ${base.detail.resting} + lekka aktywność ${r0(GARMIN_ACTIVE_HAIRCUT * base.detail.quietActive)} (aktywne ×0,85), plus ok. ${RUN_KCAL_PER_KG_KM} kcal/kg/km planowanego biegu. Gdy Garmin pokaże dziś więcej wysiłku, cel rośnie. Szczegóły: /spalanie`
+        : `Kcal z kalibracji (waga i spożycie): ok. ${base.kcal} kcal na przeciętny dzień`
       : "Kcal z g/kg (brak danych o spalaniu: Garmin lub ≥ 3 tygodnie zapisów i wagi)",
     "",
   );
   for (const t of ["rest", "easy", "quality", "long"] as DayType[]) {
     const x = computeTargets(cfg, w, t, base);
-    lines.push(`• ${DAY_TYPE_PL[t]}: ${x ? `${x.kcal} kcal · B ${x.protein} · W ${x.carbs} (${pl(r1(x.carbs / (ref ?? 1)))} g/kg) · T ${x.fat}${x.deficitApplied > 0 ? ` · deficyt ${x.deficitApplied}` : ""}` : "brak wagi"}`);
+    lines.push(`• ${DAY_TYPE_PL[t]}${base?.detail && DEFAULT_RUN_KM[t] ? ` (ok. ${DEFAULT_RUN_KM[t]} km)` : ""}: ${x ? `${x.kcal} kcal · B ${x.protein} · W ${x.carbs} (${pl(r1(x.carbs / (ref ?? 1)))} g/kg) · T ${x.fat}${x.deficitApplied > 0 ? ` · deficyt ${x.deficitApplied}` : ""}` : "brak wagi"}`);
   }
   await say(env, lines.join("\n"));
 }
@@ -565,9 +602,10 @@ async function cmdBurn(env: Env) {
   const perDay = full.map(([, e]) => e.resting! + GARMIN_ACTIVE_HAIRCUT * e.active!).sort((a, b) => a - b);
   lines.push("");
   if (base?.detail) {
-    lines.push(`Baza do celów (mediana, aktywne ×0,85): <b>${base.kcal}</b> kcal`);
-    const quiet = perDay.slice(0, Math.min(3, perDay.length));
-    lines.push(`Najspokojniejsze dni (3 najniższe): ok. ${r0(quiet.reduce((a, b) => a + b, 0) / quiet.length)} kcal, najbardziej aktywne: ${r0(perDay[perDay.length - 1])} kcal`);
+    const d = base.detail;
+    lines.push(`Spokojny dzień (baza celów): <b>${d.resting} + ${r0(GARMIN_ACTIVE_HAIRCUT * d.quietActive)} = ${r0(d.resting + GARMIN_ACTIVE_HAIRCUT * d.quietActive)}</b> kcal (spoczynkowe + aktywne ×0,85 z najspokojniejszych dni)`);
+    lines.push(`Mediana wszystkich dni: ${base.kcal} kcal, najbardziej aktywny: ${r0(perDay[perDay.length - 1])} kcal`);
+    lines.push("Do tego cel dolicza bieg z planu, a gdy Garmin pokaże dziś więcej wysiłku, rośnie do faktycznego spalania.");
   } else if (base) lines.push(`Baza do celów: <b>${base.kcal}</b> kcal (${base.source === "kalibracja" ? "z kalibracji wagi i spożycia" : "Garmin"})`);
   else lines.push(`Za mało pełnych dni z danymi (jest ${full.length}, potrzeba min. 5), żeby policzyć bazę.`);
   lines.push("<i>Duże rozrzuty między dniami oznaczają zwykle aktywności, o których cel nie wie z góry (spacery, góry, trening poza planem).</i>");
@@ -819,7 +857,7 @@ export async function nutritionReport(env: Env, days: number) {
     teraz: { data: today, godzina: local.time },
     typ_dnia: { typ: DAY_TYPE_PL[info.dayType], powod: info.dayTypeWhy },
     cele_dzis: info.targets
-      ? { kcal: info.targets.kcal, bialko_g: info.targets.protein, weglowodany_g: info.targets.carbs, tluszcz_g: info.targets.fat, zrodlo_kcal: info.targets.source === "g/kg" ? "g/kg masy ciała (brak danych o spalaniu)" : info.targets.source === "garmin" ? `mediana spalania z Garmina z 14 dni (aktywne ×0,85): ${info.base?.kcal} kcal/dzień` : `kalibracja z wagi i spożycia: ${info.base?.kcal} kcal/dzień`, uwaga: info.targets.note }
+      ? { kcal: info.targets.kcal, bialko_g: info.targets.protein, weglowodany_g: info.targets.carbs, tluszcz_g: info.targets.fat, zrodlo_kcal: info.targets.source === "g/kg" ? "g/kg masy ciała (brak danych o spalaniu)" : info.targets.source === "garmin" ? `spokojny dzień z Garmina (spoczynkowe ${info.base?.detail?.resting} + aktywne ×0,85 z najspokojniejszych dni) plus bieg z planu (${info.runKm ?? "domyślny"} km); rośnie, gdy dzisiejszy wysiłek wg Garmina przekracza plan` : `kalibracja z wagi i spożycia: ${info.base?.kcal} kcal/dzień`, uwaga: info.targets.note }
       : "brak (Jan nie podał wagi: /waga)",
     spozycie_dzis: {
       ...tot,

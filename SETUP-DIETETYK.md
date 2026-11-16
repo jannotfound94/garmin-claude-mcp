@@ -82,11 +82,11 @@ Gdy model nie jest pewny składnika, który wyraźnie zmienia wynik, zadaje jedn
 ## Jak to liczy cele
 
 **Kalorie dnia** wynikają z Twojego rzeczywistego zapotrzebowania:
-1. Na początku: **mediana** dziennego spalania z Garmina z ostatnich 14 dni (spoczynkowe + aktywne × 0,85, bo kalorie aktywne bywają zawyżone). Mediana, żeby pojedynczy dziwny dzień nie zawyżał celu. Dzień po dniu zobaczysz to komendą `/spalanie`.
+1. Na początku: **od spokojnego dnia** z Garmina w górę. Baza to spoczynkowe spalanie plus lekka aktywność (aktywne kalorie × 0,85, bo bywają zawyżone) liczone z najspokojniejszych dni ostatnich 14 dni. Do tego cel **dolicza bieg z planu** (ok. 0,9 kcal na kg masy na km; bez dystansu przyjmuje 6 km dla łatwego, 8 km dla akcentu, 18 km dla długiego biegu). Gdy w ciągu dnia **Garmin pokaże więcej wysiłku, niż było w planie** (spacer, góry, dłuższy bieg), cel rośnie do faktycznego spalania i bot to zaznacza. Dzień po dniu zobaczysz dane komendą `/spalanie`.
 2. Po ok. 3–4 tygodniach (min. 14 zapisanych dni i 4 ważenia): zapotrzebowanie wyliczone z bilansu spożycia i trendu wagi. To dokładniejsze niż Garmin i zastępuje go automatycznie.
 3. Bez żadnych z tych danych: cele liczone czysto z gramów na kg masy ciała.
 
-Zapotrzebowanie jest mnożone przez współczynnik zależny od typu dnia (bez biegu 0,93; łatwy bieg 1,03; akcent 1,08; długi bieg 1,20). **Białko** (domyślnie 1,8 g/kg) i **tłuszcz** (1,0 g/kg) idą z masy ciała, a **węglowodany dopełniają resztę**. Typ dnia serwer ustala z kalendarza intervals.icu i z tego, co faktycznie zrobiłeś (bierze cięższą wersję): dzień bez biegu, łatwy bieg, akcent (tempo/interwały) albo długi bieg (od 16 km lub 100 min, albo „długi” w nazwie).
+Przy kalibracji z wagi (poniżej) zapotrzebowanie jest mnożone przez współczynnik typu dnia (bez biegu 0,93; łatwy bieg 1,03; akcent 1,08; długi bieg 1,20). **Białko** (domyślnie 1,8 g/kg) i **tłuszcz** (1,0 g/kg) idą z masy ciała, a **węglowodany dopełniają resztę**. Typ dnia serwer ustala z kalendarza intervals.icu i z tego, co faktycznie zrobiłeś (bierze cięższą wersję): dzień bez biegu, łatwy bieg, akcent (tempo/interwały) albo długi bieg (od 16 km lub 100 min, albo „długi” w nazwie).
 
 **Deficyt** (domyślnie 400 kcal, zmiana: `/cel deficyt 300`) obowiązuje tylko w dni bez biegu i łatwe, kosztem węglowodanów, nigdy białka. Węglowodany nie schodzą poniżej 2 g/kg masy referencyjnej, więc przy dużej masie ciała deficyt bywa ograniczony (bot pisze o tym w `/dzis`). Wtedy ustaw masę referencyjną (`/cel masa 95`) albo obniż białko (`/cel bialko 1,5`).
 
