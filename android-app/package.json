@@ -1,8 +1,8 @@
 {
-  "name": "janek-trener-android",
+  "name": "garda-android",
   "version": "1.0.0",
   "private": true,
-  "description": "Opakowanie aplikacji Janek Trener (PWA z public/app) w APK przez Capacitor. Buduje je workflow .github/workflows/build-apk.yml.",
+  "description": "Opakowanie aplikacji Garda (PWA z public/app) w APK przez Capacitor. Buduje je workflow .github/workflows/build-apk.yml.",
   "scripts": {
     "config": "node scripts/make-config.mjs"
   },

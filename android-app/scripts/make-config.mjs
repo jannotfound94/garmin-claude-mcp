@@ -20,8 +20,8 @@ url.search = "";
 url.hash = "";
 
 const config = {
-  appId: "pl.janek.trener",
-  appName: "Janek Trener",
+  appId: "pl.janek.garda",
+  appName: "Garda",
   webDir: "www",
   backgroundColor: "#0b0d12",
   server: {

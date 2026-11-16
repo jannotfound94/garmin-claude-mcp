@@ -1,5 +1,5 @@
 // Warstwa komunikacji z serwerem: token w urządzeniu, błędy z czytelnym kodem, wylogowanie przy 401.
-const KEY = "janek.token";
+const KEY = "garda.token";
 
 export const auth = {
   get token() {

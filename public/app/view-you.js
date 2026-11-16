@@ -219,7 +219,7 @@ function settings(body) {
           save,
         ),
       ),
-      card({ icon: "user", tone: "orange", title: "Konto" }, h("button", { class: "btn danger", onclick: () => { auth.clear(); rerender(); } }, icon("logout", 17), "Wyloguj"), h("div", { class: "small muted" }, "Janek Trener v2 · kalorie liczy serwer, zdjęcia rozpoznaje Gemini, plan układa trener (Claude).")),
+      card({ icon: "user", tone: "orange", title: "Konto" }, h("button", { class: "btn danger", onclick: () => { auth.clear(); rerender(); } }, icon("logout", 17), "Wyloguj"), h("div", { class: "small muted" }, "Garda v2 · kalorie liczy serwer, zdjęcia rozpoznaje Gemini, plan układa trener (Claude).")),
     );
   }).catch((e) => body.replaceChildren(h("div", { class: "card" }, `⚠️ ${errMsg(e)}`)));
 }

@@ -1,5 +1,5 @@
 // Service worker: powłoka aplikacji działa offline, dane (/api) zawsze z sieci.
-const CACHE = "janek-app-v2";
+const CACHE = "garda-app-v1";
 const SHELL = ["./", "style.css", "app.js", "api.js", "charts.js", "icons.js", "ui.js", "meals.js", "view-today.js", "view-food.js", "view-plan.js", "view-you.js", "icon.svg", "icon-192.png", "icon-512.png", "manifest.webmanifest"];
 
 self.addEventListener("install", (e) => {

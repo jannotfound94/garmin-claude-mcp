@@ -1,4 +1,4 @@
-// Janek Trener: aplikacja (PWA). Czysty JavaScript bez bundlera. Dane od serwera i od modelu AI wstawiamy wyłącznie jako
+// Garda: aplikacja (PWA). Czysty JavaScript bez bundlera. Dane od serwera i od modelu AI wstawiamy wyłącznie jako
 // tekst (textContent), nigdy jako HTML, więc nazwa produktu z "<" czy "&" niczego nie zepsuje ani nie wstrzyknie.
 import { api, auth } from "./api.js";
 import { openAddMeal } from "./meals.js";
@@ -27,7 +27,7 @@ function viewLogin(message = "") {
   };
   btn.addEventListener("click", go);
   pw.addEventListener("keydown", (e) => e.key === "Enter" && go());
-  return h("div", { class: "login" }, h("div", { class: "box" }, h("img", { src: "icon.svg", alt: "" }), h("h1", {}, "Janek Trener"), h("div", { class: "sub", style: { textAlign: "center" } }, "Plan treningowy, kalorie i regeneracja w jednym miejscu."), pw, err, btn));
+  return h("div", { class: "login" }, h("div", { class: "box" }, h("img", { src: "icon.svg", alt: "" }), h("h1", {}, "Garda"), h("div", { class: "sub", style: { textAlign: "center" } }, "Plan treningowy, kalorie i regeneracja w jednym miejscu."), pw, err, btn));
 }
 
 const NAV = [

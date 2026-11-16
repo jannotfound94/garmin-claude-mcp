@@ -1,4 +1,4 @@
-# Aplikacja Janek Trener: uruchomienie krok po kroku
+# Aplikacja Garda: uruchomienie krok po kroku
 
 Aplikacja to druga „twarz” tego samego systemu co bot na Telegramie: ten sam serwer, te same dane, ta sama logika. Pokazuje podsumowanie dnia z rekomendacjami, tracker jedzenia (zdjęcie lub opis), plan treningowy z trasami, wykres wagi względem planu i rozmowę z trenerem. Ciemny motyw, wygląda i działa jak zwykła aplikacja.
 
@@ -40,9 +40,9 @@ APK budujemy w chmurze GitHuba, nie na Twoim komputerze. Jest to cienkie opakowa
 1. Na GitHubie w repozytorium: **Settings → Secrets and variables → Actions → zakładka Variables → New repository variable**:
    - nazwa: `APP_URL`
    - wartość: adres z kroku 1, z `https://` i końcówką `/app/`
-2. Zakładka **Actions → „Build APK (Janek Trener)” → Run workflow → Run workflow**.
+2. Zakładka **Actions → „Build APK (Garda)” → Run workflow → Run workflow**.
 3. Poczekaj ok. 10–15 minut (przy pierwszym uruchomieniu GitHub pobiera narzędzia Androida). Zielony znaczek = gotowe.
-4. Wejdź w zakładkę **Releases** (prawa strona strony głównej repozytorium) i na telefonie pobierz plik `janek-trener-….apk`.
+4. Wejdź w zakładkę **Releases** (prawa strona strony głównej repozytorium) i na telefonie pobierz plik `garda-….apk`.
 5. Otwórz pobrany plik. Android poprosi o zezwolenie przeglądarce na **instalację z nieznanych źródeł**: zezwól tylko dla tej instalacji. Google Play Protect może ostrzec, bo aplikacja nie jest ze sklepu: to normalne dla własnego APK.
 6. Uruchom aplikację i zaloguj się hasłem. Zdjęcia posiłków zrobisz aparatem w aplikacji (Android zapyta o zgodę na aparat).
 
