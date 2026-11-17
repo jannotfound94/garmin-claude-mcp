@@ -30,6 +30,7 @@ const MAX_BODY_BYTES = 8 * 1024 * 1024;
 /** Adresy usług push przeglądarek (Chrome/FCM, Firefox, Safari, Edge/WNS). Serwer nie wysyła powiadomień gdziekolwiek indziej. */
 const PUSH_ENDPOINT = /^https:\/\/(fcm\.googleapis\.com|android\.googleapis\.com|updates\.push\.services\.mozilla\.com|[a-z0-9.-]+\.push\.apple\.com|[a-z0-9.-]+\.notify\.windows\.com)\//;
 const IMAGE_MIMES = new Set(["image/jpeg", "image/png", "image/webp", "image/heic", "image/heif"]);
+const MAX_IMAGES = 4;
 const API_RUN = { budgetMs: 55_000, attemptCapMs: 25_000 }; // żądanie HTTP nie ma 30-sekundowego limitu pracy w tle
 
 const json = (data: unknown, status = 200, headers: Record<string, string> = {}) =>
@@ -238,11 +239,17 @@ export async function handleApi(request: Request, env: Env): Promise<Response> {
     if (path === "/api/meals" && method === "POST") {
       const b = await readJson(request);
       const text = String(b.text ?? "").trim().slice(0, 1500);
-      const img = b.image && typeof b.image === "object" ? b.image : null;
-      if (!text && !img) throw new HttpError(400, "empty", "Napisz, co zjadłeś, albo dodaj zdjęcie.");
-      if (img && (!IMAGE_MIMES.has(String(img.mime)) || typeof img.data !== "string" || img.data.length < 100 || img.data.length > 7_000_000)) {
-        throw new HttpError(400, "bad_image", "Zdjęcie musi być w formacie JPEG, PNG lub WebP i mieć do ok. 5 MB.");
+      // Jedno zdjęcie ("image") albo kilka zdjęć jednego posiłku ("images": talerz, opakowanie, etykieta), najwyżej MAX_IMAGES.
+      const rawImgs: any[] = Array.isArray(b.images) ? b.images : b.image && typeof b.image === "object" ? [b.image] : [];
+      if (rawImgs.length > MAX_IMAGES) throw new HttpError(400, "too_many_images", `Najwyżej ${MAX_IMAGES} zdjęcia do jednego posiłku.`);
+      const imgs = rawImgs.filter((x) => x && typeof x === "object");
+      if (!text && !imgs.length) throw new HttpError(400, "empty", "Napisz, co zjadłeś, albo dodaj zdjęcie.");
+      for (const im of imgs) {
+        if (!IMAGE_MIMES.has(String(im.mime)) || typeof im.data !== "string" || im.data.length < 100 || im.data.length > 7_000_000) {
+          throw new HttpError(400, "bad_image", "Zdjęcie musi być w formacie JPEG, PNG lub WebP i mieć do ok. 5 MB.");
+        }
       }
+      if (imgs.reduce((n, im) => n + im.data.length, 0) > 14_000_000) throw new HttpError(400, "bad_image", "Zdjęcia razem są za duże (do ok. 10 MB).");
       if (b.kind != null && b.kind !== "" && !isMealKind(b.kind)) throw new HttpError(400, "bad_kind", "Nieznany rodzaj posiłku.");
       const kind = isMealKind(b.kind) ? b.kind : undefined;
       const unix = mealUnix(b);
@@ -250,7 +257,7 @@ export async function handleApi(request: Request, env: Env): Promise<Response> {
       let a;
       try {
         a = await analyzeMeal(env, {
-          ...(img ? { image: { mime: String(img.mime), b64: img.data } } : {}),
+          ...(imgs.length ? { images: imgs.map((im) => ({ mime: String(im.mime), b64: String(im.data) })) } : {}),
           note: text,
           nowLocal,
           slotNames: await slotNamesFor(env, nowLocal.date),
@@ -260,7 +267,7 @@ export async function handleApi(request: Request, env: Env): Promise<Response> {
         mapGeminiError(e);
       }
       if (!a.isFood) throw new HttpError(422, "no_food", "Nie widzę tu jedzenia ani picia. Dopisz opis, jeśli to jednak posiłek.");
-      const r = await buildAndSaveMeal(env, a, { source: img ? "photo" : "text", note: text, msgUnix: unix, ...(kind ? { kind } : {}) });
+      const r = await buildAndSaveMeal(env, a, { source: imgs.length ? "photo" : "text", note: text, msgUnix: unix, ...(kind ? { kind } : {}) });
       return json({ meal: r.meal, slotName: r.slotName, extra: r.extra, overview: await dayOverview(env, r.meal.date) }, 201);
     }
     const mealRoute = /^\/api\/meals\/([0-9]{8}\.[0-9a-f]{6})(?:\/(revise|favorite))?$/.exec(path);

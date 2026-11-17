@@ -27,6 +27,8 @@ export interface MealAnalysis {
 
 export interface AnalyzeInput {
   image?: { mime: string; b64: string };
+  /** Kilka zdjęć jednego posiłku (talerz, opakowanie, etykieta). Ma pierwszeństwo przed `image`. */
+  images?: { mime: string; b64: string }[];
   note?: string;
   /** Poprawka istniejącego posiłku: model dostaje poprzednią wersję i uwagę Jana. */
   previous?: { label: string; note: string; items: FoodItem[] };
@@ -96,6 +98,8 @@ export function toBase64(buf: ArrayBuffer): string {
   return btoa(bin);
 }
 
+export const imagesOf = (i: AnalyzeInput) => (i.images?.length ? i.images : i.image ? [i.image] : []);
+
 function userText(input: AnalyzeInput): string {
   const lines = [`Teraz jest ${input.nowLocal.date} ${input.nowLocal.time} (czas polski).`];
   if (input.previous) {
@@ -107,11 +111,13 @@ function userText(input: AnalyzeInput): string {
     if (input.previous.note) lines.push(`Pierwotna notatka Jana: "${input.previous.note}".`);
   } else if (input.note?.trim()) {
     lines.push(`Notatka Jana: "${input.note.trim()}".`);
-  } else if (input.image) {
+  } else if (imagesOf(input).length) {
     lines.push("Jan nie dodał notatki.");
   }
   if (input.slotNames?.length) lines.push(`Plan posiłków Jana (dozwolone wartości meal_slot): ${input.slotNames.join(", ")}.`);
-  if (!input.image) lines.push("Brak zdjęcia: policz posiłek wyłącznie z opisu Jana.");
+  const n = imagesOf(input).length;
+  if (!n) lines.push("Brak zdjęcia: policz posiłek wyłącznie z opisu Jana.");
+  else if (n > 1) lines.push(`Dołączono ${n} zdjęcia tego samego posiłku (np. talerz i opakowanie produktu). Rozważ wszystkie razem jako jeden posiłek. Wartości z etykiety lub opakowania na którymś zdjęciu mają pierwszeństwo (basis="label"), a pozostałe zdjęcia służą do oceny porcji.`);
   return lines.join("\n");
 }
 
@@ -124,7 +130,7 @@ const THINKING_VARIANTS: (Record<string, unknown> | null)[] = [{ thinkingLevel: 
 
 function buildBody(input: AnalyzeInput, thinking: Record<string, unknown> | null) {
   const parts: any[] = [];
-  if (input.image) parts.push({ inlineData: { mimeType: input.image.mime, data: input.image.b64 } });
+  for (const im of imagesOf(input)) parts.push({ inlineData: { mimeType: im.mime, data: im.b64 } });
   parts.push({ text: userText(input) });
   return {
     systemInstruction: { parts: [{ text: SYSTEM }] },
@@ -255,7 +261,7 @@ class ClaudeHttpError extends Error {
 async function callClaude(env: Env, input: AnalyzeInput, timeoutMs: number): Promise<MealAnalysis> {
   const model = env.CLAUDE_FOOD_MODEL || DEFAULT_CLAUDE_MODEL;
   const content: any[] = [];
-  if (input.image) content.push({ type: "image", source: { type: "base64", media_type: input.image.mime, data: input.image.b64 } });
+  for (const im of imagesOf(input)) content.push({ type: "image", source: { type: "base64", media_type: im.mime, data: im.b64 } });
   content.push({ type: "text", text: userText(input) });
   let res: Response;
   let text: string;
@@ -336,7 +342,7 @@ export function extractJson(text: string): any {
 
 async function callCompat(p: CompatProvider, input: AnalyzeInput, timeoutMs: number): Promise<MealAnalysis> {
   const content: any[] = [{ type: "text", text: userText(input) }];
-  if (input.image) content.push({ type: "image_url", image_url: { url: `data:${input.image.mime};base64,${input.image.b64}` } });
+  for (const im of imagesOf(input)) content.push({ type: "image_url", image_url: { url: `data:${im.mime};base64,${im.b64}` } });
   // Modele bez trybu "schema" dostają opis pól w poleceniu, a odpowiedź jako zwykły obiekt JSON.
   const system = `${SYSTEM}\n\nOdpowiedz jednym obiektem JSON o takich polach (schemat JSON Schema): ${JSON.stringify(toJsonSchema(SCHEMA))}`;
   let res: Response;
@@ -421,10 +427,11 @@ export async function analyzeMeal(env: Env, input: AnalyzeInput): Promise<MealAn
     const stepCap = (left: number) => (isLast ? left : Math.min(left, steps.length > 1 ? Math.min(cap, 14_000) : cap));
     const left0 = deadline - Date.now();
     if (left0 < MIN_ATTEMPT_MS) throw fail();
-    if (step.kind !== "gemini" && input.image) {
+    if (step.kind !== "gemini") {
       const ok = step.kind === "claude" ? CLAUDE_IMAGES : COMPAT_IMAGES;
-      if (!ok.has(input.image.mime)) {
-        errors.push(`${step.kind === "claude" ? "Claude" : step.p.label}: format zdjęcia ${input.image.mime} nie jest obsługiwany`);
+      const bad = imagesOf(input).find((im) => !ok.has(im.mime));
+      if (bad) {
+        errors.push(`${step.kind === "claude" ? "Claude" : step.p.label}: format zdjęcia ${bad.mime} nie jest obsługiwany`);
         continue;
       }
     }

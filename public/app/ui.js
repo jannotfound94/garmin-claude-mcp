@@ -76,10 +76,73 @@ export function toast(msg, kind = "info", ms = 3800) {
   setTimeout(() => t.remove(), ms);
 }
 
+// Okna (arkusze) uczestniczą w historii przeglądarki: przycisk "wstecz" w telefonie najpierw zamyka okno, a dopiero potem
+// cofa ekran. Bez tego "wstecz" przy otwartym oknie wychodziło z aplikacji na pulpit. Każde okno dodaje wpis historii
+// (pushState); zamknięcie przyciskiem cofa ten wpis (history.back), a cofnięcie systemowe zamyka okno.
+const sheetStack = [];
+let sheetSeq = 0;
+let ignorePops = 0;
+let deferred = [];
+let popListener = false;
+
+function ensurePopListener() {
+  if (popListener) return;
+  popListener = true;
+  window.addEventListener("popstate", () => {
+    if (ignorePops > 0) {
+      ignorePops--;
+      if (!ignorePops) flushDeferred();
+      return;
+    }
+    const top = sheetStack[sheetStack.length - 1];
+    // Wpis okna zniknął z historii (użytkownik cofnął): zamykamy okno bez ponownego cofania.
+    if (top && !(history.state && history.state.sheetId === top.id)) {
+      sheetStack.pop();
+      top.bg.remove();
+    }
+  });
+}
+function flushDeferred() {
+  const fns = deferred;
+  deferred = [];
+  fns.forEach((fn) => fn());
+}
+
 export function openSheet(build) {
+  // Poprzednie okno właśnie się zamyka (history.back jeszcze trwa): otwieramy to po zakończeniu cofania, żeby wpisy się nie pomieszały.
+  if (ignorePops > 0) {
+    let closeLater = null;
+    let early = false;
+    deferred.push(() => {
+      closeLater = openSheet(build);
+      if (early) closeLater();
+    });
+    setTimeout(() => ignorePops > 0 && ((ignorePops = 0), flushDeferred()), 700); // zabezpieczenie, gdyby popstate nie nadszedł
+    return () => (closeLater ? closeLater() : (early = true));
+  }
+  ensurePopListener();
+  const id = ++sheetSeq;
   const bg = h("div", { class: "sheet-bg", onclick: (e) => e.target === bg && close() });
   const sheet = h("div", { class: "sheet", role: "dialog", "aria-modal": "true" }, h("div", { class: "grab" }));
-  const close = () => bg.remove();
+  let closed = false;
+  const close = () => {
+    if (closed) return;
+    closed = true;
+    const i = sheetStack.findIndex((x) => x.id === id);
+    if (i >= 0) sheetStack.splice(i, 1);
+    bg.remove();
+    // Wpis historii tego okna jest bieżący: cofamy go (popstate pomijamy, okno już zniknęło).
+    if (history.state && history.state.sheetId === id) {
+      ignorePops++;
+      history.back();
+    }
+  };
+  try {
+    history.pushState({ sheetId: id }, "");
+  } catch {
+    /* brak historii (np. tryb osadzony): okno działa bez obsługi "wstecz" */
+  }
+  sheetStack.push({ id, bg });
   append(sheet, [build(close)]);
   bg.append(sheet);
   document.body.append(bg);

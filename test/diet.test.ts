@@ -706,3 +706,56 @@ test("planSteps: domyślna kolejność (Gemini główny, darmowi, płatni, Gemin
   assert.equal(planSteps({ ...all, FOOD_PRIMARY: "claude" }).map(name)[0], "claude");
   assert.deepEqual(planSteps({} as any), []);
 });
+
+// ---------------- kilka zdjęć jednego posiłku ----------------
+
+test("kilka zdjęć: wszystkie trafiają do Gemini, Claude i dostawców zgodnych z OpenAI, a polecenie mówi o jednym posiłku z kilku zdjęć", async () => {
+  const imgs = [{ mime: "image/jpeg", b64: "QUFB" }, { mime: "image/jpeg", b64: "QkJC" }, { mime: "image/png", b64: "Q0ND" }];
+  // Gemini
+  let w = stubAll({ gemini: gemOk });
+  try {
+    await analyzeMeal({ GEMINI_API_KEY: "g" } as any, { ...input, images: imgs });
+    const parts = w.last.gemini.body.contents[0].parts;
+    assert.equal(parts.filter((p: any) => p.inlineData).length, 3);
+    assert.deepEqual(parts.filter((p: any) => p.inlineData).map((p: any) => p.inlineData.data), ["QUFB", "QkJC", "Q0ND"]);
+    assert.match(parts[parts.length - 1].text, /Dołączono 3 zdjęcia/);
+  } finally {
+    w.restore();
+  }
+  // Claude i GitHub Models (Gemini niedostępny)
+  w = stubAll({ gemini: geminiDown, github: () => chatOk(), claude: claudeOk });
+  try {
+    await analyzeMeal({ GEMINI_API_KEY: "g", GITHUB_MODELS_TOKEN: "t" } as any, { ...input, images: imgs });
+    const content = w.last.github.body.messages[1].content;
+    assert.equal(content.filter((c: any) => c.type === "image_url").length, 3);
+    assert.equal(content.find((c: any) => c.image_url?.url.startsWith("data:image/png")).image_url.url, "data:image/png;base64,Q0ND");
+  } finally {
+    w.restore();
+  }
+  w = stubAll({ gemini: geminiDown, claude: claudeOk });
+  try {
+    await analyzeMeal({ GEMINI_API_KEY: "g", ANTHROPIC_API_KEY: "a" } as any, { ...input, images: imgs });
+    assert.equal(w.last.claude.body.messages[0].content.filter((c: any) => c.type === "image").length, 3);
+  } finally {
+    w.restore();
+  }
+  // jedno zdjęcie przez stare pole "image" nadal działa, bez wzmianki o kilku zdjęciach
+  w = stubAll({ gemini: gemOk });
+  try {
+    await analyzeMeal({ GEMINI_API_KEY: "g" } as any, { ...input, image: imgs[0] });
+    const parts = w.last.gemini.body.contents[0].parts;
+    assert.equal(parts.filter((p: any) => p.inlineData).length, 1);
+    assert.ok(!/Dołączono/.test(parts[parts.length - 1].text));
+  } finally {
+    w.restore();
+  }
+  // jedno z kilku zdjęć w HEIC: dostawcy poza Gemini są pomijani
+  w = stubAll({ gemini: (m) => (m === "gemini-3.5-flash" ? geminiDown() : gemOk()), github: tooMany });
+  try {
+    const a = await analyzeMeal({ GEMINI_API_KEY: "g", GITHUB_MODELS_TOKEN: "t" } as any, { ...input, images: [imgs[0], { mime: "image/heic", b64: "SEVJQw==" }] });
+    assert.equal(a.model, "gemini-3.5-flash-lite");
+    assert.ok(!w.calls.includes("github"));
+  } finally {
+    w.restore();
+  }
+});

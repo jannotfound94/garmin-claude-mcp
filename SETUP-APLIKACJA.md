@@ -92,6 +92,14 @@ Pierwsza karta na ekranie „Dziś” to zegar postu przerywanego (domyślnie 16
 
 Waga (Mi Scale 2) → Zepp Life → Google Fit → **intervals.icu** (Ustawienia → Połączenia → Google Fit, Wellness) → Garda. Serwer sprawdza intervals.icu co kilkanaście minut oraz przy otwarciu aplikacji i dopisuje wagę (a jeśli jest, także procent tkanki tłuszczowej) z ostatnich dwóch tygodni. Po pierwszym pomiarze dnia możesz dostać powiadomienie „Waga zapisana”. Waga wpisana ręcznie w aplikacji zawsze wygrywa i automat jej nie nadpisuje. Procent tłuszczu pokazuje się w Ty → Postęp jako osobny wykres (pomiar orientacyjny, liczy się kierunek zmian). Jeśli waga nie pojawia się w Gardzie, sprawdź najpierw, czy jest w intervals.icu w Wellness pod właściwą datą.
 
+## Kilka zdjęć jednego posiłku
+
+W oknie „Dodaj posiłek” możesz dodać do 4 zdjęć jednego posiłku (przycisk „Zdjęcie” dodaje kolejne, „Galeria” pozwala zaznaczyć kilka naraz). Model dostaje wszystkie razem i liczy jeden posiłek, a wartości z zdjęcia opakowania lub etykiety (np. fety) mają pierwszeństwo przed zgadywaniem porcji. Zdjęcia w HEIC obsługuje tylko Gemini (patrz SETUP-DIETETYK.md).
+
+## Przycisk „wstecz” i okna
+
+Przycisk „wstecz” w telefonie najpierw zamyka otwarte okno (np. dodawanie posiłku), a dopiero potem cofa ekran. Dotyczy aplikacji w Chrome i w APK. Pliki GPX z mapy i z Planu otwierają się z listą aplikacji tylko w nowym APK (zmiana w kodzie natywnym), więc po scaleniu zbuduj APK od nowa: Actions → Build APK (Garda) → Run workflow.
+
 ## Jak korzystać
 
 - **Dodaj posiłek:** pomarańczowy przycisk ＋ na dole (działa na każdym ekranie). Zdjęcie z aparatu lub z galerii, opis tekstem, godzina (gdy dopisujesz coś z wcześniej). Jeśli Gemini jest chwilowo przeciążony, aplikacja sama ponowi próbę kilka razy.
