@@ -5,7 +5,7 @@ import {
   DEFAULT_CONFIG, classifyDay, computeTargets, estimateTdee, evaluateReminders, labelForTime, normalizeItem,
   overallConfidence, parseSlots, satisfiedSlots, slotKey, slotsFor, sumMacros, weightSlopePerDay, weightStats, dateOfMealId, newMealId,
 } from "../src/nutrition";
-import { parseAnalysis, applyBarcode, analyzeMeal, GeminiTransientError, toJsonSchema } from "../src/gemini";
+import { parseAnalysis, applyBarcode, analyzeMeal, GeminiTransientError, toJsonSchema, planSteps, extractJson } from "../src/gemini";
 import { greeting, recommend, type RecInput } from "../src/recommend";
 import { loggingStreak, weekStart } from "../src/summary";
 
@@ -615,4 +615,94 @@ test("rozpoznawanie: oba dostawcy chwilowo niedostępni to błąd do ponowienia;
 test("toJsonSchema: typy małymi literami, nullable jako typ z null, zagnieżdżone tablice i enumy", () => {
   const out = toJsonSchema({ type: "OBJECT", properties: { a: { type: "STRING", nullable: true }, b: { type: "ARRAY", items: { type: "OBJECT", properties: { c: { type: "STRING", enum: ["x", "y"] } }, required: ["c"] } } }, required: ["b"] });
   assert.deepEqual(out, { type: "object", properties: { a: { type: ["string", "null"] }, b: { type: "array", items: { type: "object", properties: { c: { type: "string", enum: ["x", "y"] } }, required: ["c"] } } }, required: ["b"] });
+});
+
+// ---------------- darmowi dostawcy zgodni z OpenAI: GitHub Models i Groq ----------------
+
+function stubAll(behave: { gemini?: (m: string) => Response; github?: () => Response; groq?: () => Response; claude?: () => Response }) {
+  const orig = globalThis.fetch;
+  const calls: string[] = [];
+  const last: Record<string, { url: string; body: any; headers: any }> = {};
+  globalThis.fetch = (async (url: any, init?: any) => {
+    const u = String(url);
+    const host = u.includes("models.github.ai") ? "github" : u.includes("api.groq.com") ? "groq" : u.includes("api.anthropic.com") ? "claude" : "gemini";
+    const model = host === "gemini" ? u.split("/models/")[1].split(":")[0] : "";
+    calls.push(host === "gemini" ? `gemini:${model}` : host);
+    last[host] = { url: u, body: init?.body ? JSON.parse(init.body) : null, headers: init?.headers };
+    const fn = (behave as any)[host] as ((m: string) => Response) | undefined;
+    if (!fn) throw new Error(`nieoczekiwany dostawca ${host}`);
+    return fn(model);
+  }) as any;
+  return { calls, last, restore: () => (globalThis.fetch = orig) };
+}
+const chatOk = (content: unknown = foodJson) => new Response(JSON.stringify({ choices: [{ message: { content: typeof content === "string" ? content : JSON.stringify(content) } }] }));
+const tooMany = () => new Response("rate limit", { status: 429 });
+const envFree = { GEMINI_API_KEY: "gk", GITHUB_MODELS_TOKEN: "ghp_x", GROQ_API_KEY: "gq" } as any;
+
+test("rozpoznawanie: Gemini padł, odpowiada GPT z GitHub Models (darmowy), żądanie ma zdjęcie jako data URL i schemat w poleceniu", async () => {
+  const w = stubAll({ gemini: geminiDown, github: () => chatOk() });
+  try {
+    const a = await analyzeMeal(envFree, { ...input, image: { mime: "image/jpeg", b64: "QUJD" } });
+    assert.equal(a.model, "openai/gpt-4.1");
+    assert.equal(a.items[0].kcal, 330);
+    assert.deepEqual(w.calls, ["gemini:gemini-3.5-flash", "github"]);
+    const g = w.last.github;
+    assert.equal(g.url, "https://models.github.ai/inference/chat/completions");
+    assert.equal(g.headers.authorization, "Bearer ghp_x");
+    assert.deepEqual(g.body.response_format, { type: "json_object" });
+    assert.equal(g.body.messages[1].content[1].image_url.url, "data:image/jpeg;base64,QUJD");
+    assert.match(g.body.messages[0].content, /JSON Schema/);
+    assert.match(g.body.messages[0].content, /dietetykiem sportowym/);
+  } finally {
+    w.restore();
+  }
+});
+
+test("rozpoznawanie: limit GitHub Models (429) przechodzi na Groq; odpowiedź w bloku ```json jest rozumiana", async () => {
+  const w = stubAll({ gemini: geminiDown, github: tooMany, groq: () => chatOk("```json\n" + JSON.stringify(foodJson) + "\n```") });
+  try {
+    const a = await analyzeMeal(envFree, input);
+    assert.equal(a.model, "meta-llama/llama-4-scout-17b-16e-instruct");
+    assert.deepEqual(w.calls, ["gemini:gemini-3.5-flash", "github", "groq"]);
+    assert.equal(w.last.groq.url, "https://api.groq.com/openai/v1/chat/completions");
+  } finally {
+    w.restore();
+  }
+  assert.deepEqual(extractJson('Oto wynik: {"a":1} koniec'), { a: 1 });
+  assert.throws(() => extractJson("brak"), /JSON/);
+});
+
+test("rozpoznawanie: HEIC omija dostawców innych niż Gemini (zapasowy model Gemini go obsłuży); wszyscy niedostępni to błąd do ponowienia", async () => {
+  let w = stubAll({ gemini: (m) => (m === "gemini-3.5-flash" ? geminiDown() : gemOk()), github: tooMany, groq: tooMany });
+  try {
+    const a = await analyzeMeal(envFree, { ...input, image: { mime: "image/heic", b64: "QUJD" } });
+    assert.equal(a.model, "gemini-3.5-flash-lite");
+    assert.deepEqual(w.calls, ["gemini:gemini-3.5-flash", "gemini:gemini-3.5-flash-lite"], "GitHub i Groq pominięte bez zapytania");
+  } finally {
+    w.restore();
+  }
+  w = stubAll({ gemini: geminiDown, github: tooMany, groq: () => new Response("oops", { status: 503 }) });
+  try {
+    await assert.rejects(analyzeMeal(envFree, input), (e: any) => e instanceof GeminiTransientError && /GitHub Models/.test(e.message) && /Groq/.test(e.message));
+  } finally {
+    w.restore();
+  }
+  // zły token GitHub (401) + Groq 401 + Gemini 404: trwały błąd
+  w = stubAll({ gemini: () => new Response("gone", { status: 404 }), github: () => new Response("bad", { status: 401 }), groq: () => new Response("bad", { status: 401 }) });
+  try {
+    await assert.rejects(analyzeMeal(envFree, input), (e: any) => !(e instanceof GeminiTransientError));
+  } finally {
+    w.restore();
+  }
+});
+
+test("planSteps: domyślna kolejność (Gemini główny, darmowi, płatni, Gemini zapasowy), FOOD_PROVIDERS i FOOD_PRIMARY, tylko dostępni", () => {
+  const all = { GEMINI_API_KEY: "g", GITHUB_MODELS_TOKEN: "t", GROQ_API_KEY: "q", OPENAI_API_KEY: "o", ANTHROPIC_API_KEY: "a" } as any;
+  const name = (st: any) => (st.kind === "gemini" ? `gemini:${st.model}` : st.kind === "compat" ? st.p.id : st.kind);
+  assert.deepEqual(planSteps(all).map(name), ["gemini:gemini-3.5-flash", "github", "groq", "openai", "claude", "gemini:gemini-3.5-flash-lite"]);
+  assert.deepEqual(planSteps({ GROQ_API_KEY: "q" } as any).map(name), ["groq"]);
+  assert.deepEqual(planSteps({ ...all, FOOD_PROVIDERS: "claude, gemini ,nieznany,claude" }).map(name), ["claude", "gemini:gemini-3.5-flash", "gemini:gemini-3.5-flash-lite"]);
+  assert.deepEqual(planSteps({ ...all, FOOD_PROVIDERS: "groq,github" }).map(name), ["groq", "github"]);
+  assert.equal(planSteps({ ...all, FOOD_PRIMARY: "claude" }).map(name)[0], "claude");
+  assert.deepEqual(planSteps({} as any), []);
 });
