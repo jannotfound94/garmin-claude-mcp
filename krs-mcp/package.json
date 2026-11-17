@@ -1,0 +1,17 @@
+{
+  "name": "krs-mcp",
+  "version": "0.1.0",
+  "description": "Lokalny serwer MCP (stdio) do Otwartego API KRS Ministerstwa Sprawiedliwości",
+  "type": "module",
+  "bin": { "krs-mcp": "src/server.js" },
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "node --test test/*.test.js"
+  },
+  "engines": { "node": ">=20" },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "zod": "^3.25.0"
+  },
+  "license": "MIT"
+}
