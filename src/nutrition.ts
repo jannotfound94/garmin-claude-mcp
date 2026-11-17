@@ -465,6 +465,10 @@ export function computeTargets(cfg: NutritionConfig, weightKg: number | null, da
 export interface Weight {
   date: string;
   kg: number;
+  /** "auto" = zaimportowana z wagi przez intervals.icu; brak = wpisana ręcznie (ręczny wpis nie jest nadpisywany). */
+  src?: "auto";
+  /** Tkanka tłuszczowa w % (z inteligentnej wagi, pomiar orientacyjny). */
+  fatPct?: number;
 }
 
 export function weightStats(weights: Weight[], today: string) {

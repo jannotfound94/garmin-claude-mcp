@@ -20,6 +20,7 @@ import {
 } from "./nutrition";
 import { buildPlan, buildRoutes, buildSummary, buildWeek } from "./summary";
 import { buildTextRoutes } from "./textroute";
+import { syncWeights } from "./weightsync";
 import { HOUR, MAX_FAST_H, MIN_FAST_H, clampHours, fastStats, phaseMs } from "./fasting";
 import { coach } from "./telegram";
 import { daysBetween, warsaw, warsawToUtc } from "./time";
@@ -297,6 +298,7 @@ export async function handleApi(request: Request, env: Env): Promise<Response> {
 
     // ----- waga -----
     if (path === "/api/weight" && method === "GET") {
+      await syncWeights(env, { maxAgeMs: 10 * 60_000 }).catch((e) => console.error("syncWeights", e)); // świeża waga z wagi przy otwarciu zakładki
       const [weights, cfg] = await Promise.all([st.getWeights(), st.getNutCfg()]);
       const today = warsaw().date;
       const gp = goalProgress(weights, cfg.goalWeightKg, today, cfg.goalDate);
