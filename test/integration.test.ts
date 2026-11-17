@@ -1152,3 +1152,39 @@ test("syncWeights: zapisuje wagę z intervals.icu, nie nadpisuje ręcznej, ogran
   icuWellness = [];
   mock.timers.reset();
 });
+
+test("post przerywany: godzina rozpoczęcia okna (przesunięcie po automatycznym starcie) i godzina zakończenia postu wstecz", async () => {
+  mock.timers.reset(); mock.timers.enable({ apis: ["Date"], now: new Date("2026-12-20T18:00:00Z") }); // 19:00 w Warszawie
+  TOKEN = await issueToken(env);
+  for (const k of ["fast:state", "fast:hist"]) store.delete(k);
+  await state.patchNutCfg({ fastHours: 16, notifyChannel: "telegram" });
+  const post = (p: string, body: any = {}) => api(`/api/fasting/${p}`, { method: "POST", body });
+  const HOUR_MS = 3600_000;
+
+  await post("finish-eating"); // post 18:00Z -> koniec 10:00Z
+  mock.timers.setTime(Date.parse("2026-12-21T11:30:00Z")); // 12:30; okno ruszyło samo o 10:00Z (11:00)
+  let v = (await api("/api/fasting")).body;
+  assert.equal(v.state.phase, "window");
+  assert.equal(v.state.start, Date.parse("2026-12-21T10:00:00Z"));
+
+  // Janek zaczął jeść o 10:45 (09:45Z), czyli PRZED automatycznym startem okna: post krótszy niż cel
+  const early = await post("start-eating", { at: "10:45" });
+  assert.equal(early.status, 200);
+  assert.equal(early.body.state.start, Date.parse("2026-12-21T09:45:00Z"));
+  assert.equal(early.body.state.end, Date.parse("2026-12-21T09:45:00Z") + 8 * HOUR_MS);
+  assert.equal(early.body.stats.count, 1);
+  assert.equal(early.body.stats.lastReached, false);
+  assert.equal(early.body.stats.lastHours, 15.8);
+
+  // zaczął jednak dopiero o 12:00 (11:00Z): okno przesuwa się później, post wydłuża się i znów osiąga cel
+  const later = await post("start-eating", { at: "12:00" });
+  assert.equal(later.body.state.start, Date.parse("2026-12-21T11:00:00Z"));
+  assert.equal(later.body.stats.count, 1, "ten sam post zaktualizowany, bez dubla");
+  assert.equal(later.body.stats.lastReached, true);
+  assert.equal(later.body.stats.lastHours, 17);
+
+  // za wcześnie: tuż po starcie postu (19:05 wczoraj) i zbyt dawno
+  assert.equal((await post("start-eating", { at: "19:05" })).status, 400);
+  assert.equal((await post("start-eating", { at: "13:00" })).status, 400, "13:00 jest dopiero za pół godziny, więc liczyłoby się wczoraj, czyli ponad 20 h temu");
+  mock.timers.reset();
+});

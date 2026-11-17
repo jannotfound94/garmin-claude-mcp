@@ -54,6 +54,9 @@
       },
       "GEMINI_API_KEY": {
         "description": "Optional, for the dietitian. Free key from aistudio.google.com (Get API key)."
+      },
+      "ANTHROPIC_API_KEY": {
+        "description": "Optional fallback for the dietitian when Gemini is unavailable. API key from console.anthropic.com."
       }
     }
   }

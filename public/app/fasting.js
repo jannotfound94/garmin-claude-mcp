@@ -25,9 +25,9 @@ const clock = (ms) => {
   return `${Math.floor(m / 60)}:${String(m % 60).padStart(2, "0")}`;
 };
 
-function timeSheet({ title, text, confirm, onConfirm }) {
+function timeSheet({ title, text, confirm, onConfirm, value }) {
   openSheet((close) => {
-    const t = h("input", { type: "time", value: warsawTime(Date.now()), "aria-label": "Godzina" });
+    const t = h("input", { type: "time", value: value || warsawTime(Date.now()), "aria-label": "Godzina" });
     const go = h("button", { class: "btn block" }, confirm);
     go.addEventListener("click", async () => {
       go.disabled = true;
@@ -59,6 +59,17 @@ export function fastingCard(root) {
     timeSheet({ title: "Kiedy skończyłeś jeść?", text: "Wpisz godzinę ostatniego jedzenia (z dzisiaj, a jeśli jest późniejsza niż teraz, z wczoraj).", confirm: "Zacznij post od tej godziny", onConfirm: async (at) => { await call("finish-eating", { at }); toast("Post liczy się od wybranej godziny ⏱"); } });
   const restartAt = () =>
     timeSheet({ title: "Jadłeś dłużej?", text: "Post liczy się od nowa, od podanej godziny (domyślnie od teraz).", confirm: "Zacznij post od tej godziny", onConfirm: async (at) => { await call("finish-eating", { at, restart: true }); toast("Post liczy się od nowa ⏱"); } });
+  const eatingAt = (isFast, startMs) =>
+    timeSheet({
+      title: isFast ? "O której zacząłeś jeść?" : "Od której trwa okno jedzenia?",
+      text: isFast ? "Post zakończy się o tej godzinie, a okno jedzenia zacznie się od niej (godzina z dzisiaj, a jeśli jest późniejsza niż teraz, z wczoraj)." : "Okno ruszyło samo po końcu postu. Jeśli zacząłeś jeść później, wpisz godzinę: okno i poprzedni post zostaną przeliczone.",
+      confirm: "Zapisz godzinę",
+      value: isFast ? undefined : warsawTime(startMs),
+      onConfirm: async (at) => {
+        await call("start-eating", { at });
+        toast("Zapisane ✅");
+      },
+    });
   const startEating = (elapsed, goalMs) => {
     const doIt = async () => {
       try {
@@ -102,10 +113,12 @@ export function fastingCard(root) {
       kids.push(h("div", { class: "fastrow" }, ring({ value: elapsed, max: total, size: 150, stroke: 11, tone, center: clock(left), sub: isFast ? "do końca postu" : "do końca okna", label: isFast ? "Czas do końca postu" : "Czas do końca okna jedzenia" }), info));
       if (isFast) {
         kids.push(h("button", { class: "btn outline-orange block", onclick: () => startEating(elapsed, s.goalHours * HOUR) }, icon("meal", 18), "Zaczynam jeść"));
+        kids.push(h("button", { class: "linkbtn", onclick: () => eatingAt(true, s.start) }, "zacząłem jeść o innej godzinie…"));
         if (elapsed < 3 * HOUR) kids.push(h("button", { class: "linkbtn", onclick: restartAt }, "jadłem dłużej, zacznij post od innej godziny…"));
       } else {
         kids.push(h("button", { class: "btn block", onclick: finishNow }, icon("moon", 18), "Skończyłem jeść"));
         kids.push(h("button", { class: "linkbtn", onclick: finishAt }, "skończyłem o innej godzinie…"));
+        kids.push(h("button", { class: "linkbtn", onclick: () => eatingAt(false, s.start) }, "zacząłem jeść o innej godzinie…"));
       }
       const r = wrap.querySelector(".range");
       if (r) r.textContent = `${s.goalHours}:${24 - s.goalHours}`;

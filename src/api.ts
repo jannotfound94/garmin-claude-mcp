@@ -89,12 +89,23 @@ function mealUnix(body: any): number {
 }
 
 function mapGeminiError(e: unknown): never {
-  if (e instanceof GeminiTransientError) throw new HttpError(503, "gemini_busy", "Gemini jest chwilowo przeciążony. Spróbuj za moment.");
+  if (e instanceof GeminiTransientError) throw new HttpError(503, "gemini_busy", "Rozpoznawanie posiłków jest chwilowo przeciążone (Gemini nie odpowiada). Spróbuj za moment.");
   if (e instanceof Error && /GEMINI_API_KEY/.test(e.message)) throw new HttpError(501, "gemini_not_configured", "Rozpoznawanie posiłków nie jest skonfigurowane (brak GEMINI_API_KEY).");
   throw new HttpError(502, "analysis_failed", `Nie udało się rozpoznać posiłku: ${String(e instanceof Error ? e.message : e).replace(/key=[^&\s]+/g, "key=…").slice(0, 200)}`);
 }
 
 // ---------------- ustawienia ----------------
+
+/** Godzina "GG:MM" z dzisiaj (a jeśli jest późniejsza niż teraz, z wczoraj), najwyżej 20 godzin wstecz. Brak = undefined (teraz). */
+function parseClock(at: unknown): number | undefined {
+  if (at == null || at === "") return undefined;
+  if (typeof at !== "string" || !validHhmm(at)) throw new HttpError(400, "bad_time", "Zła godzina.");
+  const now = Date.now();
+  let ms = warsawToUtc(`${warsaw().date} ${at}`).getTime();
+  if (ms > now + 60_000) ms -= 24 * HOUR;
+  if (now - ms > 20 * HOUR) throw new HttpError(400, "bad_time", "Ta godzina jest zbyt dawno temu.");
+  return ms;
+}
 
 /** Stan postu przerywanego dla aplikacji (czasy w ms, odliczanie liczy aplikacja; serwer nadrabia zaległe przejścia faz). */
 async function fastingView(env: Env) {
@@ -356,21 +367,13 @@ export async function handleApi(request: Request, env: Env): Promise<Response> {
     if (path === "/api/fasting" && method === "GET") return json(await fastingView(env));
     if (path === "/api/fasting/finish-eating" && method === "POST") {
       const b = await readJson(request).catch(() => ({}) as any);
-      const now = Date.now();
-      let at: number | undefined;
-      if (b.at != null) {
-        if (typeof b.at !== "string" || !validHhmm(b.at)) throw new HttpError(400, "bad_time", "Zła godzina.");
-        // Godzina z dzisiaj, a jeśli wypadałaby w przyszłości, to z wczoraj; najwyżej 20 godzin wstecz.
-        const w = warsaw();
-        at = warsawToUtc(`${w.date} ${b.at}`).getTime();
-        if (at > now + 60_000) at -= 24 * HOUR;
-        if (now - at > 20 * HOUR) throw new HttpError(400, "bad_time", "Ta godzina jest zbyt dawno temu.");
-      }
-      await st.fastFinishEating(at, b.restart === true);
+      await st.fastFinishEating(parseClock(b.at), b.restart === true);
       return json(await fastingView(env));
     }
     if (path === "/api/fasting/start-eating" && method === "POST") {
-      await st.fastStartEating();
+      const b = await readJson(request).catch(() => ({}) as any);
+      const r = await st.fastStartEating(parseClock(b.at));
+      if (r.error) throw new HttpError(400, "too_early", "Ta godzina jest zbyt blisko początku postu albo przed nim. Podaj późniejszą.");
       return json(await fastingView(env));
     }
 

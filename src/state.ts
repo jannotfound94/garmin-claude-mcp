@@ -3,7 +3,7 @@ import { fmtWarsaw } from "./time";
 import type { GarminToken } from "./garmin";
 import type { LatLon, RouteProposal } from "./routes";
 import { type PushSub, type VapidKeys, generateVapid } from "./push";
-import { type FastRecord, type FastState, HOUR, advance, clampHours, finishEating, startEating, transitionMessage } from "./fasting";
+import { type FastRecord, type FastState, HOUR, MIN_FAST_RECORD_MS, advance, clampHours, finishEating, startEating, startPhase, transitionMessage } from "./fasting";
 import { DEFAULT_CONFIG, type DietJob, type Meal, type NutritionConfig, type Weight, dateOfMealId } from "./nutrition";
 
 export interface Favorite {
@@ -290,12 +290,35 @@ export class CoachState extends DurableObject<Env> {
     return (await this.fastTick(false)) ?? state;
   }
 
-  async fastStartEating(): Promise<FastState> {
+  /**
+   * "Zaczynam jeść" (atMs puste = teraz) albo "okno zaczęło się o GG:MM" (atMs w przeszłości). W trakcie postu kończy go o tej
+   * godzinie. W trakcie okna przesuwa jego początek (np. post skończył się 8:00 i okno ruszyło samo, a Janek zaczął jeść o 10:45),
+   * a poprzedni post w historii dostaje właściwy koniec.
+   */
+  async fastStartEating(atMs?: number): Promise<{ state: FastState; error?: "too_early" }> {
     const cfg = await this.getNutCfg();
+    const hours = clampHours(cfg.fastHours);
     await this.fastTick(false);
-    const { state, record, changed } = startEating(await this.getFast(), Date.now(), clampHours(cfg.fastHours));
-    if (changed) await this.saveFast(state, record ? [record] : []);
-    return state;
+    const now = Date.now();
+    const at = Math.min(atMs ?? now, now);
+    const cur = await this.getFast();
+    if (cur?.phase === "window") {
+      if (atMs === undefined) return { state: cur };
+      const hist = await this.getFastHistory();
+      const last = hist[hist.length - 1];
+      const follows = last && Math.abs(last.end - cur.start) < 2 * 60_000; // ostatni zapisany post to ten tuż przed tym oknem
+      if (follows && at - last.start < MIN_FAST_RECORD_MS) return { state: cur, error: "too_early" };
+      if (follows) {
+        hist[hist.length - 1] = { ...last, end: at, reached: at - last.start >= last.goalHours * HOUR - 60_000, by: "manual" };
+        await this.ctx.storage.put("fast:hist", hist);
+      }
+      await this.saveFast(startPhase("window", at, hours));
+      return { state: (await this.fastTick(false)) ?? (await this.getFast())! };
+    }
+    if (cur && at - cur.start < MIN_FAST_RECORD_MS) return { state: cur, error: "too_early" };
+    const { state, record } = startEating(cur, at, hours);
+    await this.saveFast(state, record ? [record] : []);
+    return { state: (await this.fastTick(false)) ?? state };
   }
 
   // ---------- Garmin Personal API bearer token cache ----------

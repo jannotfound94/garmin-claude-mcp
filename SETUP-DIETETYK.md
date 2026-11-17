@@ -28,6 +28,15 @@ Dzięki temu zużycie jest rozłożone na dwie platformy, a Claude nie traci tok
    - nazwa: `GEMINI_API_KEY`, wartość: skopiowany klucz → **Deploy**.
 3. (Opcjonalnie) zmienne zwykłe `GEMINI_MODEL` i `GEMINI_FALLBACK_MODEL`, jeśli chcesz podmienić modele. Domyślnie: `gemini-3.5-flash` (główny) i `gemini-3.5-flash-lite` (zapasowy, gdy główny wyczerpie limit lub jest niedostępny). Jeśli Google wycofa model, wpisz tu nazwę aktualnego z AI Studio, bez zmiany kodu.
 
+## Gdy Gemini często jest niedostępny: zapasowy dostawca (Claude) i płatny klucz Gemini
+
+Rozpoznawanie posiłków wywołuje model Gemini. Darmowy klucz z AI Studio ma niski limit i najniższy priorytet, więc w godzinach szczytu odpowiedzi „503 / przeciążony” i „429 / limit” zdarzają się często. Są dwa sposoby, które można połączyć:
+
+1. **Zapasowy dostawca Claude (zalecane).** Gdy Gemini nie odpowiada, serwer od razu pyta Claude, bez czekania na kolejne próby. Potrzebny jest klucz API z console.anthropic.com (to osobne rozliczenie od subskrypcji Claude: zakładka API Keys → Create Key, potem doładowanie konta, np. 5 USD wystarczy na setki posiłków). W Cloudflare → Workers & Pages → serwer → Settings → Variables and Secrets dodaj **Secret** `ANTHROPIC_API_KEY` i kliknij Deploy. Opcjonalnie zwykłe zmienne: `CLAUDE_FOOD_MODEL` (domyślnie `claude-sonnet-5-5`; tańszy i szybszy jest `claude-haiku-5-5`) oraz `FOOD_PRIMARY=claude`, jeśli Claude ma być pierwszy (Gemini zostaje zapasowym).
+2. **Płatny poziom Gemini.** Subskrypcja Google AI Pro (aplikacja Gemini) nie daje limitów API: klucz API rozlicza się osobno. W AI Studio (aistudio.google.com) przy projekcie klucza włącz rozliczenia (Set up billing): płacisz za zużycie (przy posiłkach to grosze miesięcznie), a limity są wyraźnie wyższe. Model z rodziny Pro wpiszesz w zmiennej `GEMINI_MODEL`, jeśli chcesz dokładniejszych wyników kosztem czasu.
+
+Zdjęcia w formacie HEIC obsługuje tylko Gemini (Claude ich nie przyjmuje), reszta formatów działa u obu.
+
 ## Krok 3. Odśwież webhook i sprawdź Gemini (1 minuta)
 
 1. Otwórz stronę `https://TWÓJ-SERWER.workers.dev/setup`, wpisz hasło (`MCP_PASSWORD`).
