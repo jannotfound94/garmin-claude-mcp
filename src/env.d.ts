@@ -14,6 +14,10 @@ interface CoachEnv {
   GEMINI_API_KEY?: string;
   GEMINI_MODEL?: string;
   GEMINI_FALLBACK_MODEL?: string;
+  // Zapasowy dostawca rozpoznawania posiłków (opcjonalny): klucz z console.anthropic.com. FOOD_PRIMARY=claude zaczyna od Claude.
+  ANTHROPIC_API_KEY?: string;
+  CLAUDE_FOOD_MODEL?: string;
+  FOOD_PRIMARY?: string;
   OAUTH_KV: KVNamespace;
   MCP_OBJECT: DurableObjectNamespace;
   COACH_STATE: DurableObjectNamespace<import("./state").CoachState>;

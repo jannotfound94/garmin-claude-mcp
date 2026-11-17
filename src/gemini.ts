@@ -196,6 +196,11 @@ export function parseAnalysis(resp: any, model: string, slotNames: string[] = []
   } catch {
     throw new Error(`Gemini ${model}: niepoprawny JSON (${cand?.finishReason ?? "?"})`);
   }
+  return analysisFromJson(j, model, slotNames);
+}
+
+/** Wspólne dla wszystkich dostawców: znormalizowany wynik z JSON-a zgodnego ze schematem. */
+export function analysisFromJson(j: any, model: string, slotNames: string[] = []): MealAnalysis {
   const items = (Array.isArray(j.items) ? j.items : []).map(normalizeItem).filter(Boolean) as FoodItem[];
   const eaten = typeof j.eaten_time === "string" && validHhmm(j.eaten_time) ? normHhmm(j.eaten_time) : null;
   const str = (v: unknown) => (typeof v === "string" && v.trim() ? v.trim().slice(0, 300) : null);
@@ -220,39 +225,141 @@ function isTransient(e: unknown): boolean {
   return e instanceof Error && /niepoprawny JSON/.test(e.message);
 }
 
+// ---------------- Claude (zapasowy dostawca rozpoznawania posiłków) ----------------
+
+export const DEFAULT_CLAUDE_MODEL = "claude-sonnet-5-5";
+const CLAUDE_IMAGES = new Set(["image/jpeg", "image/png", "image/webp", "image/gif"]);
+
+/** Schemat Gemini (typy wielkimi literami, nullable) -> zwykły JSON Schema dla Claude. */
+export function toJsonSchema(s: any): any {
+  if (Array.isArray(s)) return s.map(toJsonSchema);
+  if (!s || typeof s !== "object") return s;
+  const o: any = {};
+  for (const [k, v] of Object.entries(s)) {
+    if (k === "nullable") continue;
+    o[k] = k === "type" && typeof v === "string" ? v.toLowerCase() : toJsonSchema(v);
+  }
+  if (s.nullable && typeof o.type === "string") o.type = [o.type, "null"];
+  return o;
+}
+
+class ClaudeHttpError extends Error {
+  constructor(
+    readonly status: number,
+    msg: string,
+  ) {
+    super(msg);
+  }
+}
+
+async function callClaude(env: Env, input: AnalyzeInput, timeoutMs: number): Promise<MealAnalysis> {
+  const model = env.CLAUDE_FOOD_MODEL || DEFAULT_CLAUDE_MODEL;
+  const content: any[] = [];
+  if (input.image) content.push({ type: "image", source: { type: "base64", media_type: input.image.mime, data: input.image.b64 } });
+  content.push({ type: "text", text: userText(input) });
+  let res: Response;
+  let text: string;
+  try {
+    res = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-api-key": env.ANTHROPIC_API_KEY!, "anthropic-version": "2023-06-01" },
+      body: JSON.stringify({
+        model,
+        max_tokens: 2048,
+        temperature: 0.2,
+        system: SYSTEM,
+        tools: [{ name: "zapisz_posilek", description: "Zapisz rozpoznany posiłek zgodnie ze schematem.", input_schema: toJsonSchema(SCHEMA) }],
+        tool_choice: { type: "tool", name: "zapisz_posilek" },
+        messages: [{ role: "user", content }],
+      }),
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    text = await res.text();
+  } catch (e) {
+    if (e instanceof Error && (e.name === "TimeoutError" || e.name === "AbortError")) throw new ClaudeHttpError(0, `Claude ${model}: brak odpowiedzi w ciągu ${Math.round(timeoutMs / 1000)} s`);
+    throw e;
+  }
+  if (!res.ok) throw new ClaudeHttpError(res.status, `Claude ${model} ${res.status}: ${text.slice(0, 200)}`);
+  let j: any;
+  try {
+    j = JSON.parse(text);
+  } catch {
+    throw new ClaudeHttpError(502, `Claude ${model}: odpowiedź nie jest JSON-em`);
+  }
+  const tool = (j.content ?? []).find((c: any) => c?.type === "tool_use" && c.input && typeof c.input === "object");
+  if (!tool) throw new Error(`Claude ${model}: brak wyniku (${j.stop_reason ?? "pusta odpowiedź"})`);
+  return analysisFromJson(tool.input, model, input.slotNames);
+}
+
+const claudeTransient = (e: unknown) => e instanceof ClaudeHttpError && (e.status === 0 || e.status === 429 || e.status === 529 || e.status >= 500);
+
+/**
+ * Rozpoznanie posiłku z kolejnością dostawców: Gemini (model główny), Claude (jeśli jest ANTHROPIC_API_KEY), Gemini (zapasowy).
+ * Ustawienie FOOD_PRIMARY=claude zaczyna od Claude. Gdy jest zapasowy dostawca, pierwsza próba jest krótsza, żeby
+ * nie czekać na przeciążony model. Wynik jest "chwilowy" (do ponowienia w tle), jeśli którakolwiek próba zawiodła chwilowo.
+ */
 export async function analyzeMeal(env: Env, input: AnalyzeInput): Promise<MealAnalysis> {
-  if (!env.GEMINI_API_KEY) throw new Error("Brak GEMINI_API_KEY");
-  const models = [env.GEMINI_MODEL || DEFAULT_MODEL, env.GEMINI_FALLBACK_MODEL || DEFAULT_FALLBACK_MODEL].filter((m, i, a) => a.indexOf(m) === i);
-  const errors: Record<string, string> = {};
-  let permanent = false; // przynajmniej jeden błąd był trwały, więc ponawianie nie ma sensu
+  const hasGemini = Boolean(env.GEMINI_API_KEY);
+  const hasClaude = Boolean(env.ANTHROPIC_API_KEY);
+  if (!hasGemini && !hasClaude) throw new Error("Brak GEMINI_API_KEY");
+  const gem = hasGemini ? [env.GEMINI_MODEL || DEFAULT_MODEL, env.GEMINI_FALLBACK_MODEL || DEFAULT_FALLBACK_MODEL].filter((m, i, a) => a.indexOf(m) === i) : [];
+  type Step = { kind: "gemini"; model: string } | { kind: "claude" };
+  const g = gem.map((model): Step => ({ kind: "gemini", model }));
+  const c: Step[] = hasClaude ? [{ kind: "claude" }] : [];
+  const steps: Step[] = env.FOOD_PRIMARY === "claude" ? [...c, ...g] : [...g.slice(0, 1), ...c, ...g.slice(1)];
+  const errors: string[] = [];
+  let transientSeen = false;
+  let permanentSeen = false;
   const fail = () => {
-    const msg = Object.values(errors).join(" | ").slice(0, 700) || "Gemini: przekroczony limit czasu";
-    return permanent ? new Error(msg) : new GeminiTransientError(msg);
+    const msg = errors.join(" | ").slice(0, 700) || "Rozpoznawanie: przekroczony limit czasu";
+    // Bez zapasowego dostawcy trwały błąd konfiguracji (zła nazwa modelu, zły request) ma pierwszeństwo: ponawianie go nie naprawi.
+    // Z Claude jako drugim dostawcą ponowienie ma sens, jeśli choć jedna próba padła chwilowo.
+    if (!errors.length) return new GeminiTransientError(msg);
+    if (permanentSeen && (!hasClaude || !transientSeen)) return new Error(msg);
+    return transientSeen ? new GeminiTransientError(msg) : new Error(msg);
   };
   // Pierwsza próba idzie w tle po odpowiedzi do Telegrama (waitUntil, ok. 30 s w Cloudflare), więc wspólny budżet czasu dla
   // wszystkich prób gwarantuje, że wynik lub błąd zdąży dojść do Jana. Zadania ponawiane w tle dostają większy budżet.
   const deadline = Date.now() + (input.budgetMs ?? BUDGET_MS);
   const cap = input.attemptCapMs ?? ATTEMPT_CAP_MS;
-  for (const [mi, model] of models.entries()) {
-    const isLast = mi === models.length - 1;
+  for (const [si, step] of steps.entries()) {
+    const isLast = si === steps.length - 1;
+    const stepCap = (left: number) => (isLast ? left : Math.min(left, si === 0 && steps.length > 1 ? Math.min(cap, 14_000) : cap));
+    if (step.kind === "claude") {
+      const left = deadline - Date.now();
+      if (left < MIN_ATTEMPT_MS) throw fail();
+      if (input.image && !CLAUDE_IMAGES.has(input.image.mime)) {
+        errors.push(`Claude: format zdjęcia ${input.image.mime} nie jest obsługiwany`);
+        continue;
+      }
+      try {
+        return await callClaude(env, input, stepCap(left));
+      } catch (e) {
+        errors.push((e instanceof Error ? e.message : String(e)).slice(0, 250));
+        if (claudeTransient(e) || (e instanceof Error && /niepoprawny JSON|nie jest JSON/.test(e.message))) transientSeen = true;
+        else permanentSeen = true;
+      }
+      continue;
+    }
     let stopped = false; // pętla wariantów przerwana innym błędem niż 400 przy ustawieniu myślenia
     for (const thinking of THINKING_VARIANTS) {
       const left = deadline - Date.now();
       if (left < MIN_ATTEMPT_MS) throw fail();
       try {
-        const resp = await callModel(env.GEMINI_API_KEY, model, buildBody(input, thinking), isLast ? left : Math.min(left, cap));
-        return parseAnalysis(resp, model, input.slotNames);
+        const resp = await callModel(env.GEMINI_API_KEY!, step.model, buildBody(input, thinking), stepCap(left));
+        return parseAnalysis(resp, step.model, input.slotNames);
       } catch (e) {
-        errors[model] = (e instanceof Error ? e.message : String(e)).slice(0, 300);
+        errors.push((e instanceof Error ? e.message : String(e)).slice(0, 250));
         // 400 przy ustawieniu myślenia = model go zwykle nie obsługuje: ten sam model, następny wariant.
         if (thinking && e instanceof GeminiHttpError && e.status === 400) continue;
-        if (!isTransient(e)) permanent = true;
+        if (isTransient(e)) transientSeen = true;
+        else permanentSeen = true;
         stopped = true;
         break; // limit (429), 5xx, 404 (nazwa modelu), pusty wynik: następny model
       }
     }
-    // Wszystkie warianty zwróciły 400: prawdziwie zły request, ponawianie nie pomoże.
-    if (!stopped) permanent = true;
+    // Wszystkie warianty zwróciły 400: prawdziwie zły request dla tego modelu (inny dostawca może go jeszcze obsłużyć).
+    if (!stopped) permanentSeen = true;
   }
   throw fail();
 }

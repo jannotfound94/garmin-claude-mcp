@@ -85,6 +85,7 @@ Pierwsza karta na ekranie „Dziś” to zegar postu przerywanego (domyślnie 16
 - Gdy czas fazy minie, następna zaczyna się sama (po poście okno 8 godzin, po oknie post) i przychodzi powiadomienie, tą samą drogą co wiadomości trenera (aplikacja i/lub Telegram). Powiadomienie jest wysyłane z serwera, więc dociera także przy zamkniętej aplikacji.
 - Po dodaniu kolacji lub posiłku po 18:00 aplikacja pyta „To już koniec jedzenia?” i jednym kliknięciem zaczyna post.
 - Karta pokazuje serię osiągniętych postów, średnią z ostatnich siedmiu i wykres ostatnich postów.
+- „zacząłem jeść o innej godzinie…” pozwala wpisać godzinę, o której faktycznie zacząłeś jeść. W trakcie postu kończy go o tej godzinie; w trakcie okna przesuwa jego początek (np. post skończył się o 8:00 i okno ruszyło samo, a Ty zacząłeś jeść o 10:45), a poprzedni post w historii dostaje właściwy koniec.
 - Długość postu zmienisz w Ty → Ustawienia („Post przerywany”), od 10 do 22 godzin. Okno to reszta doby.
 
 ## Waga z inteligentnej wagi

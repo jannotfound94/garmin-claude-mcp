@@ -27,7 +27,7 @@ export const MIN_FAST_H = 10;
 export const MAX_FAST_H = 22;
 export const DEFAULT_FAST_H = 16;
 const MAX_CATCHUP = 8; // tyle przejść nadrabiamy po długiej przerwie, potem zaczynamy od nowa
-const MIN_RECORD_MS = 10 * 60_000; // krótsze "posty" to przypadkowe kliknięcia
+export const MIN_FAST_RECORD_MS = 10 * 60_000; // krótsze "posty" to przypadkowe kliknięcia
 
 export const clampHours = (h: unknown) => {
   const n = Math.round(Number(h));
@@ -66,7 +66,7 @@ export function finishEating(st: FastState | null, now: number, fastHours: numbe
 export function startEating(st: FastState | null, now: number, fastHours: number): { state: FastState; record: FastRecord | null; changed: boolean } {
   if (st?.phase === "window") return { state: st, record: null, changed: false };
   let record: FastRecord | null = null;
-  if (st && now - st.start >= MIN_RECORD_MS) {
+  if (st && now - st.start >= MIN_FAST_RECORD_MS) {
     record = { start: st.start, end: now, goalHours: st.goalHours, reached: now - st.start >= st.goalHours * HOUR - 60_000, by: "manual" };
   }
   return { state: startPhase("window", now, fastHours), record, changed: true };

@@ -5,7 +5,7 @@ import {
   DEFAULT_CONFIG, classifyDay, computeTargets, estimateTdee, evaluateReminders, labelForTime, normalizeItem,
   overallConfidence, parseSlots, satisfiedSlots, slotKey, slotsFor, sumMacros, weightSlopePerDay, weightStats, dateOfMealId, newMealId,
 } from "../src/nutrition";
-import { parseAnalysis, applyBarcode, analyzeMeal, GeminiTransientError } from "../src/gemini";
+import { parseAnalysis, applyBarcode, analyzeMeal, GeminiTransientError, toJsonSchema } from "../src/gemini";
 import { greeting, recommend, type RecInput } from "../src/recommend";
 import { loggingStreak, weekStart } from "../src/summary";
 
@@ -503,4 +503,116 @@ test("weekStart returns the Monday of the week (Mon-Sun)", () => {
   assert.equal(weekStart("2026-11-22"), "2026-11-16"); // niedziela
   assert.equal(weekStart("2026-11-18"), "2026-11-16"); // środa
   assert.equal(weekStart("2026-12-01"), "2026-11-30"); // wtorek, przełom miesięcy
+});
+
+// ---------------- Claude jako zapasowy dostawca rozpoznawania posiłków ----------------
+
+const foodJson = { is_food: true, meal_label: "Jajecznica", items: [{ name: "jajecznica", grams: 200, kcal: 330, protein_g: 21, carbs_g: 2, fat_g: 26, confidence: "medium", basis: "estimate" }] };
+
+function stubProviders(behave: { gemini: (model: string) => Response; claude: () => Response }) {
+  const orig = globalThis.fetch;
+  const calls: string[] = [];
+  const claude: { body?: any; headers?: any } = {};
+  globalThis.fetch = (async (url: any, init?: any) => {
+    const u = String(url);
+    if (u.includes("api.anthropic.com")) {
+      calls.push("claude");
+      claude.body = JSON.parse(init.body);
+      claude.headers = init.headers;
+      return behave.claude();
+    }
+    const model = u.split("/models/")[1].split(":")[0];
+    calls.push(`gemini:${model}`);
+    return behave.gemini(model);
+  }) as any;
+  return { calls, claude, restore: () => (globalThis.fetch = orig) };
+}
+const claudeOk = () => new Response(JSON.stringify({ content: [{ type: "tool_use", name: "zapisz_posilek", input: foodJson }], stop_reason: "tool_use" }));
+const geminiDown = () => new Response("overloaded", { status: 503 });
+const gemOk = () => new Response(JSON.stringify(okBody));
+const envBoth = { GEMINI_API_KEY: "gk", ANTHROPIC_API_KEY: "ak" } as any;
+
+test("rozpoznawanie: gdy Gemini jest niedostępny, odpowiada Claude (jedna próba Gemini, potem Claude)", async () => {
+  const w = stubProviders({ gemini: geminiDown, claude: claudeOk });
+  try {
+    const a = await analyzeMeal(envBoth, { ...input, image: { mime: "image/jpeg", b64: "AAAA" } });
+    assert.equal(a.isFood, true);
+    assert.equal(a.model, "claude-sonnet-5-5");
+    assert.equal(a.items[0].kcal, 330);
+    assert.deepEqual(w.calls, ["gemini:gemini-3.5-flash", "claude"], "Claude zaraz po pierwszej nieudanej próbie, bez czekania na drugi model Gemini");
+    assert.equal(w.claude.headers["x-api-key"], "ak");
+    assert.equal(w.claude.headers["anthropic-version"], "2023-06-01");
+    assert.deepEqual(w.claude.body.tool_choice, { type: "tool", name: "zapisz_posilek" });
+    assert.equal(w.claude.body.tools[0].input_schema.type, "object");
+    assert.deepEqual(w.claude.body.tools[0].input_schema.properties.eaten_time.type, ["string", "null"]);
+    assert.equal(w.claude.body.messages[0].content[0].type, "image");
+    assert.equal(w.claude.body.messages[0].content[0].source.media_type, "image/jpeg");
+    assert.match(w.claude.body.system, /dietetykiem sportowym/);
+  } finally {
+    w.restore();
+  }
+});
+
+test("rozpoznawanie: sprawny Gemini nie woła Claude; FOOD_PRIMARY=claude zaczyna od Claude; brak kluczy to błąd konfiguracji", async () => {
+  let w = stubProviders({ gemini: gemOk, claude: claudeOk });
+  try {
+    assert.equal((await analyzeMeal(envBoth, input)).model, "gemini-3.5-flash");
+    assert.deepEqual(w.calls, ["gemini:gemini-3.5-flash"]);
+  } finally {
+    w.restore();
+  }
+  w = stubProviders({ gemini: gemOk, claude: claudeOk });
+  try {
+    const a = await analyzeMeal({ ...envBoth, FOOD_PRIMARY: "claude", CLAUDE_FOOD_MODEL: "claude-haiku-5-5" }, input);
+    assert.equal(a.model, "claude-haiku-5-5");
+    assert.deepEqual(w.calls, ["claude"]);
+  } finally {
+    w.restore();
+  }
+  // tylko Claude (bez klucza Gemini)
+  w = stubProviders({ gemini: gemOk, claude: claudeOk });
+  try {
+    assert.equal((await analyzeMeal({ ANTHROPIC_API_KEY: "ak" } as any, input)).model, "claude-sonnet-5-5");
+    assert.deepEqual(w.calls, ["claude"]);
+  } finally {
+    w.restore();
+  }
+  await assert.rejects(analyzeMeal({} as any, input), /GEMINI_API_KEY/);
+});
+
+test("rozpoznawanie: oba dostawcy chwilowo niedostępni to błąd do ponowienia; trwały błąd Gemini z Claude przeciążonym też; HEIC omija Claude", async () => {
+  let w = stubProviders({ gemini: geminiDown, claude: () => new Response("overloaded", { status: 529 }) });
+  try {
+    await assert.rejects(analyzeMeal(envBoth, input), (e: any) => e instanceof GeminiTransientError && /529/.test(e.message) && /503/.test(e.message));
+  } finally {
+    w.restore();
+  }
+  // zła nazwa modelu Gemini (404) + Claude przeciążony: ponowienie ma sens
+  w = stubProviders({ gemini: () => new Response("gone", { status: 404 }), claude: () => new Response("overloaded", { status: 529 }) });
+  try {
+    await assert.rejects(analyzeMeal(envBoth, input), (e: any) => e instanceof GeminiTransientError);
+  } finally {
+    w.restore();
+  }
+  // zły klucz Claude (401) i 404 Gemini: trwały błąd
+  w = stubProviders({ gemini: () => new Response("gone", { status: 404 }), claude: () => new Response("bad key", { status: 401 }) });
+  try {
+    await assert.rejects(analyzeMeal(envBoth, input), (e: any) => !(e instanceof GeminiTransientError));
+  } finally {
+    w.restore();
+  }
+  // HEIC: Claude go nie obsługuje, więc przy FOOD_PRIMARY=claude odpowiada Gemini
+  w = stubProviders({ gemini: gemOk, claude: claudeOk });
+  try {
+    const a = await analyzeMeal({ ...envBoth, FOOD_PRIMARY: "claude" }, { ...input, image: { mime: "image/heic", b64: "AAAA" } });
+    assert.equal(a.model, "gemini-3.5-flash");
+    assert.deepEqual(w.calls, ["gemini:gemini-3.5-flash"]);
+  } finally {
+    w.restore();
+  }
+});
+
+test("toJsonSchema: typy małymi literami, nullable jako typ z null, zagnieżdżone tablice i enumy", () => {
+  const out = toJsonSchema({ type: "OBJECT", properties: { a: { type: "STRING", nullable: true }, b: { type: "ARRAY", items: { type: "OBJECT", properties: { c: { type: "STRING", enum: ["x", "y"] } }, required: ["c"] } } }, required: ["b"] });
+  assert.deepEqual(out, { type: "object", properties: { a: { type: ["string", "null"] }, b: { type: "array", items: { type: "object", properties: { c: { type: "string", enum: ["x", "y"] } }, required: ["c"] } } }, required: ["b"] });
 });

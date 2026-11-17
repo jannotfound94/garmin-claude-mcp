@@ -57,7 +57,7 @@ export async function postWithRetry(path, body, setStatus) {
       return await api(path, { method: "POST", body, timeoutMs: 100000 });
     } catch (e) {
       if (e instanceof ApiError && e.code === "gemini_busy" && i < 3) {
-        setStatus(`Gemini jest chwilowo zajęty, próbuję ponownie (${i + 1}/3)…`);
+        setStatus(`Rozpoznawanie jest chwilowo zajęte, próbuję ponownie (${i + 1}/3)…`);
         await sleep(4000 * (i + 1));
         continue;
       }
