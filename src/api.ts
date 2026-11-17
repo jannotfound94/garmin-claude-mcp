@@ -89,6 +89,9 @@ function mealUnix(body: any): number {
 }
 
 function mapGeminiError(e: unknown): never {
+  const msg = e instanceof Error ? e.message : "";
+  // HEIC rozumie tylko Gemini: gdy on nie odpowiada, a zdjęcie jest w HEIC, podpowiadamy wyjście.
+  if (/image\/hei[cf]/.test(msg)) throw new HttpError(422, "heic_unsupported", "Zdjęcie jest w formacie HEIC, który obsługuje tylko Gemini, a ten teraz nie odpowiada. Zrób zdjęcie w JPEG (ustawienia aparatu), wybierz je z galerii albo dopisz opis posiłku.");
   if (e instanceof GeminiTransientError) throw new HttpError(503, "gemini_busy", "Rozpoznawanie posiłków jest chwilowo przeciążone (Gemini nie odpowiada). Spróbuj za moment.");
   if (e instanceof Error && /GEMINI_API_KEY/.test(e.message)) throw new HttpError(501, "gemini_not_configured", "Rozpoznawanie posiłków nie jest skonfigurowane (brak GEMINI_API_KEY).");
   throw new HttpError(502, "analysis_failed", `Nie udało się rozpoznać posiłku: ${String(e instanceof Error ? e.message : e).replace(/key=[^&\s]+/g, "key=…").slice(0, 200)}`);
