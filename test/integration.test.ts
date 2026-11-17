@@ -8,6 +8,7 @@ import { deliver, notifyCoach, reminderToken, verifyReminderToken } from "../src
 import { encryptPayload, vapidJwt } from "../src/push";
 import { b64urlDecode, b64urlEncode } from "../src/crypto";
 import { satisfiedSlots } from "../src/nutrition";
+import { pickWeights, syncWeights } from "../src/weightsync";
 
 // ---- in-memory Durable Object storage ----
 const store = new Map<string, any>();
@@ -31,6 +32,8 @@ let msgId = 100;
 const garminDays: any[] = [];
 let icuEvents: any[] = [];
 let icuActs: any[] = [];
+let icuWellness: any[] = [];
+let wellnessCalls = 0;
 const geminiBodies: any[] = [];
 const pushCalls: any[] = [];
 let pushStatus = 201;
@@ -72,6 +75,7 @@ globalThis.fetch = (async (url: any, init?: any) => {
   if (u.includes("intervals.icu")) {
     if (u.includes("/events")) return new Response(JSON.stringify(icuEvents));
     if (u.includes("/activities")) return new Response(JSON.stringify(icuActs));
+    if (u.includes("/wellness")) { wellnessCalls++; return new Response(JSON.stringify(icuWellness)); }
     return new Response("[]");
   }
   throw new Error(`unexpected fetch ${u}`);
@@ -1077,5 +1081,74 @@ test("post przerywany: API, historia, godzina wsteczna, powiadomienia o końcu p
   assert.equal(f18.body.windowHours, 6);
   assert.equal(f18.body.state.end - f18.body.state.start, 18 * HOUR_MS);
   await state.patchNutCfg({ fastHours: 16, notifyChannel: "both" });
+  mock.timers.reset();
+});
+
+// ---------------- waga z intervals.icu ----------------
+
+test("pickWeights: ręczny wpis wygrywa, nowe i zmienione pomiary z wagi wchodzą, śmieci i przyszłość odpadają", () => {
+  const existing = [{ date: "2026-12-30", kg: 105 }, { date: "2026-12-29", kg: 104.9, src: "auto" as const }];
+  const w = [
+    { id: "2026-12-31", weight: 104.44, bodyFat: 32.44 },
+    { id: "2026-12-30", weight: 103.0 }, // ręczny wpis z tego dnia zostaje
+    { id: "2026-12-29", weight: 104.9 }, // bez zmian
+    { id: "2026-12-28", weight: 0 }, // zły pomiar
+    { id: "2026-12-27", weight: 400 },
+    { id: "2027-01-02", weight: 104 }, // przyszłość
+    { id: "2026-11-01", weight: 110 }, // za stare
+    { id: "2026-12-26", weight: 105.2, bodyFat: 99 }, // tłuszcz poza zakresem: tylko waga
+    { id: "2026-12-25" }, // brak wagi
+  ];
+  assert.deepEqual(pickWeights(w, existing, "2026-12-31"), [
+    { date: "2026-12-31", kg: 104.4, src: "auto", fatPct: 32.4 },
+    { date: "2026-12-26", kg: 105.2, src: "auto" },
+  ]);
+  // zmiana wartości w automatycznym wpisie jest aktualizowana
+  assert.equal(pickWeights([{ id: "2026-12-29", weight: 104.7 }], existing, "2026-12-31")[0].kg, 104.7);
+});
+
+test("syncWeights: zapisuje wagę z intervals.icu, nie nadpisuje ręcznej, ogranicza częstotliwość, powiadamia o dzisiejszym pomiarze", async () => {
+  mock.timers.reset(); mock.timers.enable({ apis: ["Date"], now: new Date("2026-12-31T07:30:00Z") }); // 08:30
+  TOKEN = await issueToken(env);
+  store.delete("nut:weights"); store.delete("nut:wsync"); store.delete("push:subs");
+  await state.patchNutCfg({ notifyChannel: "telegram" });
+  await state.addWeight({ date: "2026-12-30", kg: 105 }); // ręczny
+  icuWellness = [{ id: "2026-12-31", weight: 104.4, bodyFat: 32.4 }, { id: "2026-12-30", weight: 103.1 }];
+  wellnessCalls = 0; sent.length = 0;
+
+  const r = await syncWeights(env, { maxAgeMs: 50 * 60_000, notify: true });
+  assert.equal(r.added, 1);
+  const list = await state.getWeights();
+  assert.deepEqual(list.find((x: any) => x.date === "2026-12-31"), { date: "2026-12-31", kg: 104.4, src: "auto", fatPct: 32.4 });
+  assert.deepEqual(list.find((x: any) => x.date === "2026-12-30"), { date: "2026-12-30", kg: 105 }, "ręczny wpis nietknięty");
+  assert.equal(sent.length, 1);
+  assert.match(sent[0].text, /104,4 kg/);
+
+  // ograniczenie częstotliwości
+  assert.equal((await syncWeights(env, { maxAgeMs: 50 * 60_000 })).skipped, "fresh");
+  assert.equal(wellnessCalls, 1);
+
+  // GET /api/weight po 11 minutach pobiera ponownie (10 min limitu) i zwraca tłuszcz
+  icuWellness = [{ id: "2026-12-31", weight: 104.2, bodyFat: 32.1 }];
+  mock.timers.setTime(Date.now() + 11 * 60_000);
+  const got = await api("/api/weight");
+  assert.equal(got.status, 200);
+  const today = got.body.entries.find((x: any) => x.date === "2026-12-31");
+  assert.equal(today.kg, 104.2);
+  assert.equal(today.fatPct, 32.1);
+  assert.equal(wellnessCalls, 2);
+  assert.equal(sent.length, 1, "otwarcie aplikacji nie wysyła powiadomień");
+
+  // ręczny wpis z aplikacji zastępuje automatyczny i od tej chwili wygrywa
+  assert.equal((await api("/api/weight", { method: "POST", body: { kg: 104.0 } })).status, 201);
+  icuWellness = [{ id: "2026-12-31", weight: 103.5 }];
+  mock.timers.setTime(Date.now() + 11 * 60_000);
+  await api("/api/weight");
+  assert.equal((await state.getWeights()).find((x: any) => x.date === "2026-12-31")!.kg, 104);
+
+  // brak kluczy: nic się nie dzieje
+  assert.equal((await syncWeights({ ...env, INTERVALS_API_KEY: "" })).skipped, "no_keys");
+  await state.patchNutCfg({ notifyChannel: "both" });
+  icuWellness = [];
   mock.timers.reset();
 });

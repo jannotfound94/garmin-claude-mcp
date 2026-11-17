@@ -6,6 +6,7 @@
 import { dayInfo, dayOverview, garminClient } from "./diet";
 import { Icu } from "./icu";
 import { loadAnchors } from "./anchors";
+import { syncWeights } from "./weightsync";
 import { currentLocation, weatherLocation } from "./loc";
 import { DAY_TYPE_PL, goalProgress, sumMacros } from "./nutrition";
 import { greeting, recommend } from "./recommend";
@@ -107,6 +108,7 @@ export async function buildSummary(env: Env) {
   const monday = weekStart(today);
   const sunday = addDays(monday, 6);
   const logDates = Array.from({ length: 60 }, (_, i) => addDays(today, -59 + i));
+  await syncWeights(env, { maxAgeMs: 30 * 60_000 }).catch((e) => console.error("syncWeights", e)); // waga z wagi przed policzeniem celów i kalorii
   const [food, tomorrowInfo, events, acts, forecast, readiness, weights, cfg, mealDays] = await Promise.all([
     settled(errors, "jedzenie", dayOverview(env, today)),
     settled(errors, "jutro", dayInfo(env, tomorrow)),

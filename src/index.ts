@@ -15,6 +15,7 @@ import { fetchForecast } from "./weather";
 import { geocode, mapPage, proposeLoops, toGpx } from "./routes";
 import { buildTextRoutes } from "./textroute";
 import { fastStats } from "./fasting";
+import { syncWeights } from "./weightsync";
 import { loadAnchors, warmAnchors } from "./anchors";
 import { hasTelegram, notifyCoach } from "./notify";
 import { coach, handleTelegramWebhook, sendTelegram, sendTelegramFile, tg, webhookSecret } from "./telegram";
@@ -748,6 +749,6 @@ export default {
   fetch: (request: Request, env: Env, ctx: ExecutionContext) => provider.fetch(request, env, ctx),
   async scheduled(_controller: ScheduledController, env: Env, ctx: ExecutionContext) {
     // The park data for the current start point is fetched here, where nobody is waiting for it.
-    ctx.waitUntil(Promise.all([runScheduler(env), warmAnchors(env).catch((e) => console.error("warmAnchors", e)), coach(env).fastTick(true).catch((e) => console.error("fastTick", e))]));
+    ctx.waitUntil(Promise.all([runScheduler(env), warmAnchors(env).catch((e) => console.error("warmAnchors", e)), coach(env).fastTick(true).catch((e) => console.error("fastTick", e)), syncWeights(env, { maxAgeMs: 50 * 60_000, notify: true }).catch((e) => console.error("syncWeights", e))]));
   },
 } satisfies ExportedHandler<Env>;

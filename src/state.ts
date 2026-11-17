@@ -428,6 +428,13 @@ export class CoachState extends DurableObject<Env> {
     list.sort((a, b) => a.date.localeCompare(b.date));
     await this.ctx.storage.put("nut:weights", list.slice(-400));
   }
+  async getWeightSyncAt(): Promise<number | null> {
+    return (await this.ctx.storage.get<number>("nut:wsync")) ?? null;
+  }
+  async setWeightSyncAt(ms: number) {
+    await this.ctx.storage.put("nut:wsync", ms);
+  }
+
   async getWeights(): Promise<Weight[]> {
     return (await this.ctx.storage.get<Weight[]>("nut:weights")) ?? [];
   }

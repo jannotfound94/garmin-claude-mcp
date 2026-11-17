@@ -96,6 +96,7 @@ async function progress(body) {
       h("div", { class: "small muted" }, "Waga skacze o 1–2 kg z dnia na dzień. Najlepiej ważyć się raz w tygodniu, rano, w podobnych warunkach."),
       h("div", { class: "row" }, h("div", { class: "grow" }, kg), addW),
     ),
+    ...fatCards(wt.entries),
     card(
       { icon: "meal", tone: "blue", title: "Ostatnie 7 dni", range: "jedzenie i spalanie" },
       weekChart({ days: wk.days.map((x) => ({ label: WD[dateObj(x.date).getUTCDay()], kcal: x.kcal, targetKcal: x.targetKcal, burnedKcal: x.burnedKcal, partial: x.partial })) }),
@@ -277,4 +278,22 @@ function pushCard() {
   };
   draw();
   return card({ icon: "bell", tone: "blue", title: "Powiadomienia i lokalizacja" }, status, btns, h("div", { class: "small muted" }, "Lokalizacja służy do pogody i tras z miejsca, w którym jesteś (zamiast udostępniania jej w Telegramie)."), h("div", { class: "btns" }, loc));
+}
+
+// ---------------- Tkanka tłuszczowa z wagi ----------------
+
+function fatCards(entries) {
+  const pts = (entries || []).filter((e) => typeof e.fatPct === "number");
+  if (!pts.length) return [];
+  const last = pts[pts.length - 1];
+  const first = pts[0];
+  const delta = pts.length > 1 ? last.fatPct - first.fatPct : null;
+  return [
+    card(
+      { icon: "scale", tone: "blue", title: "Tkanka tłuszczowa", range: "z wagi" },
+      h("div", { class: "stats2" }, stat(n1(last.fatPct), "%", { label: "Ostatnia" }), stat(delta == null ? "–" : `${delta > 0 ? "+" : ""}${n1(delta)}`, "pkt %", { label: `Od ${first.date.slice(8)}.${first.date.slice(5, 7)}` })),
+      pts.length > 1 ? weightChart({ entries: pts.slice(-30).map((e) => ({ date: e.date, kg: e.fatPct })), plan: null, goalKg: null, label: "Tkanka tłuszczowa w czasie (%)", height: 150 }) : null,
+      h("div", { class: "small muted" }, "Pomiar impedancyjny jest orientacyjny i zależy od nawodnienia. Patrz na kierunek zmian w tygodniach, nie na pojedyncze liczby."),
+    ),
+  ];
 }
