@@ -18,6 +18,14 @@ interface CoachEnv {
   ANTHROPIC_API_KEY?: string;
   CLAUDE_FOOD_MODEL?: string;
   FOOD_PRIMARY?: string;
+  // Darmowi i tani zapasowi dostawcy rozpoznawania posiłków (zgodni z API OpenAI). Każdy włącza się samym kluczem.
+  GITHUB_MODELS_TOKEN?: string; // darmowe modele GPT przez GitHub Models (token z uprawnieniem Models: Read)
+  GITHUB_MODELS_MODEL?: string;
+  GROQ_API_KEY?: string; // darmowy poziom Groq (Llama 4 Scout z obsługą zdjęć)
+  GROQ_MODEL?: string;
+  OPENAI_API_KEY?: string; // płatny
+  OPENAI_MODEL?: string;
+  FOOD_PROVIDERS?: string; // np. "gemini,github,groq,claude": własna kolejność dostawców
   OAUTH_KV: KVNamespace;
   MCP_OBJECT: DurableObjectNamespace;
   COACH_STATE: DurableObjectNamespace<import("./state").CoachState>;

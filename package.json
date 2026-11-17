@@ -55,8 +55,14 @@
       "GEMINI_API_KEY": {
         "description": "Optional, for the dietitian. Free key from aistudio.google.com (Get API key)."
       },
+      "GITHUB_MODELS_TOKEN": {
+        "description": "Optional free fallback for the dietitian (GPT via GitHub Models). Fine-grained token with Models: Read."
+      },
+      "GROQ_API_KEY": {
+        "description": "Optional free fallback for the dietitian (Llama vision via Groq). Key from console.groq.com."
+      },
       "ANTHROPIC_API_KEY": {
-        "description": "Optional fallback for the dietitian when Gemini is unavailable. API key from console.anthropic.com."
+        "description": "Optional paid fallback for the dietitian when Gemini is unavailable. API key from console.anthropic.com."
       }
     }
   }
