@@ -1188,3 +1188,29 @@ test("post przerywany: godzina rozpoczęcia okna (przesunięcie po automatycznym
   assert.equal((await post("start-eating", { at: "13:00" })).status, 400, "13:00 jest dopiero za pół godziny, więc liczyłoby się wczoraj, czyli ponad 20 h temu");
   mock.timers.reset();
 });
+
+test("API posiłki: kilka zdjęć jednego posiłku (images), limit 4, walidacja każdego zdjęcia, stare pole image nadal działa", async () => {
+  mock.timers.reset(); mock.timers.enable({ apis: ["Date"], now: new Date("2026-12-22T10:00:00Z") });
+  TOKEN = await issueToken(env);
+  store.delete("nut:meals:2026-12-22"); geminiQueue.length = 0; geminiBodies.length = 0;
+  const img = (data = "A".repeat(200), mime = "image/jpeg") => ({ mime, data });
+  const food = { is_food: true, meal_label: "Sałatka z fetą", items: [{ name: "sałatka z fetą", grams: 300, kcal: 380, protein_g: 16, carbs_g: 12, fat_g: 28, confidence: "medium", basis: "estimate" }] };
+
+  geminiQueue.push(food);
+  const ok = await api("/api/meals", { method: "POST", body: { text: "sałatka i feta z opakowania", images: [img(), img("B".repeat(200)), img("C".repeat(200), "image/png")] } });
+  assert.equal(ok.status, 201);
+  assert.equal(ok.body.meal.source, "photo");
+  const parts = geminiBodies[geminiBodies.length - 1].contents[0].parts;
+  assert.equal(parts.filter((p: any) => p.inlineData).length, 3, "wszystkie trzy zdjęcia dotarły do modelu");
+  assert.match(parts[parts.length - 1].text, /Dołączono 3 zdjęcia/);
+
+  assert.equal((await api("/api/meals", { method: "POST", body: { images: [img(), img(), img(), img(), img()] } })).status, 400, "pięć zdjęć to za dużo");
+  assert.equal((await api("/api/meals", { method: "POST", body: { images: [img(), img("x", "image/jpeg")] } })).status, 400, "zbyt krótkie dane zdjęcia");
+  assert.equal((await api("/api/meals", { method: "POST", body: { images: [img(), img("A".repeat(200), "application/pdf")] } })).status, 400, "zły format");
+  assert.equal((await api("/api/meals", { method: "POST", body: { images: [] } })).status, 400, "pusto: brak opisu i zdjęć");
+
+  geminiQueue.push(food);
+  assert.equal((await api("/api/meals", { method: "POST", body: { image: img() } })).status, 201, "stare pole image");
+  assert.equal(geminiBodies[geminiBodies.length - 1].contents[0].parts.filter((p: any) => p.inlineData).length, 1);
+  mock.timers.reset();
+});

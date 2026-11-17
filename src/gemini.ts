@@ -27,6 +27,8 @@ export interface MealAnalysis {
 
 export interface AnalyzeInput {
   image?: { mime: string; b64: string };
+  /** Kilka zdjęć jednego posiłku (talerz, opakowanie, etykieta). Ma pierwszeństwo przed `image`. */
+  images?: { mime: string; b64: string }[];
   note?: string;
   /** Poprawka istniejącego posiłku: model dostaje poprzednią wersję i uwagę Jana. */
   previous?: { label: string; note: string; items: FoodItem[] };
@@ -96,6 +98,8 @@ export function toBase64(buf: ArrayBuffer): string {
   return btoa(bin);
 }
 
+export const imagesOf = (i: AnalyzeInput) => (i.images?.length ? i.images : i.image ? [i.image] : []);
+
 function userText(input: AnalyzeInput): string {
   const lines = [`Teraz jest ${input.nowLocal.date} ${input.nowLocal.time} (czas polski).`];
   if (input.previous) {
@@ -107,11 +111,13 @@ function userText(input: AnalyzeInput): string {
     if (input.previous.note) lines.push(`Pierwotna notatka Jana: "${input.previous.note}".`);
   } else if (input.note?.trim()) {
     lines.push(`Notatka Jana: "${input.note.trim()}".`);
-  } else if (input.image) {
+  } else if (imagesOf(input).length) {
     lines.push("Jan nie dodał notatki.");
   }
   if (input.slotNames?.length) lines.push(`Plan posiłków Jana (dozwolone wartości meal_slot): ${input.slotNames.join(", ")}.`);
-  if (!input.image) lines.push("Brak zdjęcia: policz posiłek wyłącznie z opisu Jana.");
+  const n = imagesOf(input).length;
+  if (!n) lines.push("Brak zdjęcia: policz posiłek wyłącznie z opisu Jana.");
+  else if (n > 1) lines.push(`Dołączono ${n} zdjęcia tego samego posiłku (np. talerz i opakowanie produktu). Rozważ wszystkie razem jako jeden posiłek. Wartości z etykiety lub opakowania na którymś zdjęciu mają pierwszeństwo (basis="label"), a pozostałe zdjęcia służą do oceny porcji.`);
   return lines.join("\n");
 }
 
@@ -124,7 +130,7 @@ const THINKING_VARIANTS: (Record<string, unknown> | null)[] = [{ thinkingLevel: 
 
 function buildBody(input: AnalyzeInput, thinking: Record<string, unknown> | null) {
   const parts: any[] = [];
-  if (input.image) parts.push({ inlineData: { mimeType: input.image.mime, data: input.image.b64 } });
+  for (const im of imagesOf(input)) parts.push({ inlineData: { mimeType: im.mime, data: im.b64 } });
   parts.push({ text: userText(input) });
   return {
     systemInstruction: { parts: [{ text: SYSTEM }] },
@@ -255,7 +261,7 @@ class ClaudeHttpError extends Error {
 async function callClaude(env: Env, input: AnalyzeInput, timeoutMs: number): Promise<MealAnalysis> {
   const model = env.CLAUDE_FOOD_MODEL || DEFAULT_CLAUDE_MODEL;
   const content: any[] = [];
-  if (input.image) content.push({ type: "image", source: { type: "base64", media_type: input.image.mime, data: input.image.b64 } });
+  for (const im of imagesOf(input)) content.push({ type: "image", source: { type: "base64", media_type: im.mime, data: im.b64 } });
   content.push({ type: "text", text: userText(input) });
   let res: Response;
   let text: string;
@@ -291,31 +297,125 @@ async function callClaude(env: Env, input: AnalyzeInput, timeoutMs: number): Pro
   return analysisFromJson(tool.input, model, input.slotNames);
 }
 
+// ---------------- dostawcy zgodni z API OpenAI (GitHub Models, Groq, OpenAI) ----------------
+
+export interface CompatProvider {
+  id: "github" | "groq" | "openai";
+  label: string;
+  base: string;
+  key: string;
+  model: string;
+}
+
+/** Dostawcy w kolejności domyślnej: darmowe na początku. Dostępny jest ten, dla którego ustawiono klucz. */
+export function compatProviders(env: Env): CompatProvider[] {
+  const out: CompatProvider[] = [];
+  if (env.GITHUB_MODELS_TOKEN) out.push({ id: "github", label: "GitHub Models", base: "https://models.github.ai/inference", key: env.GITHUB_MODELS_TOKEN, model: env.GITHUB_MODELS_MODEL || "openai/gpt-4.1" });
+  if (env.GROQ_API_KEY) out.push({ id: "groq", label: "Groq", base: "https://api.groq.com/openai/v1", key: env.GROQ_API_KEY, model: env.GROQ_MODEL || "meta-llama/llama-4-scout-17b-16e-instruct" });
+  if (env.OPENAI_API_KEY) out.push({ id: "openai", label: "OpenAI", base: "https://api.openai.com/v1", key: env.OPENAI_API_KEY, model: env.OPENAI_MODEL || "gpt-4.1-mini" });
+  return out;
+}
+
+const COMPAT_IMAGES = new Set(["image/jpeg", "image/png", "image/webp", "image/gif"]);
+
+class CompatHttpError extends Error {
+  constructor(
+    readonly status: number,
+    msg: string,
+  ) {
+    super(msg);
+  }
+}
+
+/** Wyciąga obiekt JSON z odpowiedzi modelu (czasem w bloku ```json ... ```). */
+export function extractJson(text: string): any {
+  const t = text.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
+  try {
+    return JSON.parse(t);
+  } catch {
+    const a = t.indexOf("{");
+    const b = t.lastIndexOf("}");
+    if (a >= 0 && b > a) return JSON.parse(t.slice(a, b + 1));
+    throw new Error("niepoprawny JSON");
+  }
+}
+
+async function callCompat(p: CompatProvider, input: AnalyzeInput, timeoutMs: number): Promise<MealAnalysis> {
+  const content: any[] = [{ type: "text", text: userText(input) }];
+  for (const im of imagesOf(input)) content.push({ type: "image_url", image_url: { url: `data:${im.mime};base64,${im.b64}` } });
+  // Modele bez trybu "schema" dostają opis pól w poleceniu, a odpowiedź jako zwykły obiekt JSON.
+  const system = `${SYSTEM}\n\nOdpowiedz jednym obiektem JSON o takich polach (schemat JSON Schema): ${JSON.stringify(toJsonSchema(SCHEMA))}`;
+  let res: Response;
+  let text: string;
+  try {
+    res = await fetch(`${p.base}/chat/completions`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${p.key}` },
+      body: JSON.stringify({ model: p.model, messages: [{ role: "system", content: system }, { role: "user", content }], response_format: { type: "json_object" } }),
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    text = await res.text();
+  } catch (e) {
+    if (e instanceof Error && (e.name === "TimeoutError" || e.name === "AbortError")) throw new CompatHttpError(0, `${p.label} ${p.model}: brak odpowiedzi w ciągu ${Math.round(timeoutMs / 1000)} s`);
+    throw e;
+  }
+  if (!res.ok) throw new CompatHttpError(res.status, `${p.label} ${p.model} ${res.status}: ${text.replace(/\s+/g, " ").slice(0, 200)}`);
+  let out: string | undefined;
+  try {
+    out = JSON.parse(text)?.choices?.[0]?.message?.content;
+  } catch {
+    throw new CompatHttpError(502, `${p.label} ${p.model}: odpowiedź nie jest JSON-em`);
+  }
+  if (typeof out !== "string" || !out.trim()) throw new Error(`${p.label} ${p.model}: brak wyniku`);
+  let j: any;
+  try {
+    j = extractJson(out);
+  } catch {
+    throw new CompatHttpError(502, `${p.label} ${p.model}: niepoprawny JSON`);
+  }
+  return analysisFromJson(j, p.model, input.slotNames);
+}
+
+const compatTransient = (e: unknown) => e instanceof CompatHttpError && (e.status === 0 || e.status === 408 || e.status === 429 || e.status >= 500);
+
 const claudeTransient = (e: unknown) => e instanceof ClaudeHttpError && (e.status === 0 || e.status === 429 || e.status === 529 || e.status >= 500);
 
 /**
- * Rozpoznanie posiłku z kolejnością dostawców: Gemini (model główny), Claude (jeśli jest ANTHROPIC_API_KEY), Gemini (zapasowy).
- * Ustawienie FOOD_PRIMARY=claude zaczyna od Claude. Gdy jest zapasowy dostawca, pierwsza próba jest krótsza, żeby
- * nie czekać na przeciążony model. Wynik jest "chwilowy" (do ponowienia w tle), jeśli którakolwiek próba zawiodła chwilowo.
+ * Rozpoznanie posiłku z kolejnością dostawców. Domyślnie: Gemini (model główny), potem dostawcy zapasowi, w kolejności
+ * darmowi pierwsi (GitHub Models, Groq), potem płatni (OpenAI, Claude), na końcu Gemini (model zapasowy). Dostępni są tylko ci,
+ * dla których ustawiono klucz. FOOD_PROVIDERS ("claude,gemini,github") ustawia własną kolejność; FOOD_PRIMARY=claude to skrót.
+ * Gdy są zapasowi dostawcy, pierwsza próba jest krótsza, żeby nie czekać na przeciążony model. Wynik jest "chwilowy"
+ * (do ponowienia w tle), jeśli któraś próba zawiodła chwilowo, z wyjątkiem samego trwałego błędu konfiguracji Gemini.
  */
+type Step = { kind: "gemini"; model: string } | { kind: "claude" } | { kind: "compat"; p: CompatProvider };
+
+export function planSteps(env: Env): Step[] {
+  const gem = env.GEMINI_API_KEY ? [env.GEMINI_MODEL || DEFAULT_MODEL, env.GEMINI_FALLBACK_MODEL || DEFAULT_FALLBACK_MODEL].filter((m, i, a) => a.indexOf(m) === i) : [];
+  const compat = compatProviders(env);
+  const byId = (id: string): Step[] =>
+    id === "gemini" ? gem.map((model): Step => ({ kind: "gemini", model })) : id === "claude" ? (env.ANTHROPIC_API_KEY ? [{ kind: "claude" }] : []) : compat.filter((p) => p.id === id).map((p): Step => ({ kind: "compat", p }));
+  const order = (env.FOOD_PROVIDERS || (env.FOOD_PRIMARY === "claude" ? "claude,gemini,github,groq,openai" : "")).split(",").map((x) => x.trim().toLowerCase()).filter(Boolean);
+  if (order.length) {
+    const seen = new Set<string>();
+    return order.filter((id) => !seen.has(id) && seen.add(id)).flatMap(byId);
+  }
+  const first = byId("gemini");
+  return [...first.slice(0, 1), ...byId("github"), ...byId("groq"), ...byId("openai"), ...byId("claude"), ...first.slice(1)];
+}
+
 export async function analyzeMeal(env: Env, input: AnalyzeInput): Promise<MealAnalysis> {
-  const hasGemini = Boolean(env.GEMINI_API_KEY);
-  const hasClaude = Boolean(env.ANTHROPIC_API_KEY);
-  if (!hasGemini && !hasClaude) throw new Error("Brak GEMINI_API_KEY");
-  const gem = hasGemini ? [env.GEMINI_MODEL || DEFAULT_MODEL, env.GEMINI_FALLBACK_MODEL || DEFAULT_FALLBACK_MODEL].filter((m, i, a) => a.indexOf(m) === i) : [];
-  type Step = { kind: "gemini"; model: string } | { kind: "claude" };
-  const g = gem.map((model): Step => ({ kind: "gemini", model }));
-  const c: Step[] = hasClaude ? [{ kind: "claude" }] : [];
-  const steps: Step[] = env.FOOD_PRIMARY === "claude" ? [...c, ...g] : [...g.slice(0, 1), ...c, ...g.slice(1)];
+  const steps = planSteps(env);
+  if (!steps.length) throw new Error("Brak GEMINI_API_KEY");
+  const hasAlt = steps.some((s) => s.kind !== "gemini");
   const errors: string[] = [];
   let transientSeen = false;
   let permanentSeen = false;
   const fail = () => {
-    const msg = errors.join(" | ").slice(0, 700) || "Rozpoznawanie: przekroczony limit czasu";
+    const msg = errors.join(" | ").slice(0, 900) || "Rozpoznawanie: przekroczony limit czasu";
     // Bez zapasowego dostawcy trwały błąd konfiguracji (zła nazwa modelu, zły request) ma pierwszeństwo: ponawianie go nie naprawi.
-    // Z Claude jako drugim dostawcą ponowienie ma sens, jeśli choć jedna próba padła chwilowo.
+    // Z drugim dostawcą ponowienie ma sens, jeśli choć jedna próba padła chwilowo.
     if (!errors.length) return new GeminiTransientError(msg);
-    if (permanentSeen && (!hasClaude || !transientSeen)) return new Error(msg);
+    if (permanentSeen && (!hasAlt || !transientSeen)) return new Error(msg);
     return transientSeen ? new GeminiTransientError(msg) : new Error(msg);
   };
   // Pierwsza próba idzie w tle po odpowiedzi do Telegrama (waitUntil, ok. 30 s w Cloudflare), więc wspólny budżet czasu dla
@@ -324,19 +424,24 @@ export async function analyzeMeal(env: Env, input: AnalyzeInput): Promise<MealAn
   const cap = input.attemptCapMs ?? ATTEMPT_CAP_MS;
   for (const [si, step] of steps.entries()) {
     const isLast = si === steps.length - 1;
-    const stepCap = (left: number) => (isLast ? left : Math.min(left, si === 0 && steps.length > 1 ? Math.min(cap, 14_000) : cap));
-    if (step.kind === "claude") {
-      const left = deadline - Date.now();
-      if (left < MIN_ATTEMPT_MS) throw fail();
-      if (input.image && !CLAUDE_IMAGES.has(input.image.mime)) {
-        errors.push(`Claude: format zdjęcia ${input.image.mime} nie jest obsługiwany`);
+    const stepCap = (left: number) => (isLast ? left : Math.min(left, steps.length > 1 ? Math.min(cap, 14_000) : cap));
+    const left0 = deadline - Date.now();
+    if (left0 < MIN_ATTEMPT_MS) throw fail();
+    if (step.kind !== "gemini") {
+      const ok = step.kind === "claude" ? CLAUDE_IMAGES : COMPAT_IMAGES;
+      const bad = imagesOf(input).find((im) => !ok.has(im.mime));
+      if (bad) {
+        errors.push(`${step.kind === "claude" ? "Claude" : step.p.label}: format zdjęcia ${bad.mime} nie jest obsługiwany`);
         continue;
       }
+    }
+    if (step.kind === "claude" || step.kind === "compat") {
       try {
-        return await callClaude(env, input, stepCap(left));
+        return step.kind === "claude" ? await callClaude(env, input, stepCap(left0)) : await callCompat(step.p, input, stepCap(left0));
       } catch (e) {
         errors.push((e instanceof Error ? e.message : String(e)).slice(0, 250));
-        if (claudeTransient(e) || (e instanceof Error && /niepoprawny JSON|nie jest JSON/.test(e.message))) transientSeen = true;
+        const transient = step.kind === "claude" ? claudeTransient(e) : compatTransient(e);
+        if (transient || (e instanceof Error && /niepoprawny JSON|nie jest JSON/.test(e.message))) transientSeen = true;
         else permanentSeen = true;
       }
       continue;

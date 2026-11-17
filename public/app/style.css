@@ -243,3 +243,8 @@ hr { border: 0; border-top: 1px solid var(--line); width: 100%; margin: 2px 0; }
 .fbar { flex: 1; border-radius: 5px; background: #2a4f8f; min-height: 4px; }
 .fbar.ok { background: var(--good); }
 .fastcard .btn { margin-top: 10px; }
+
+/* kilka zdjęć jednego posiłku */
+.previews { display: flex; gap: 8px; overflow-x: auto; padding: 2px 0; }
+.previews .preview { flex: none; width: 96px; }
+.previews .preview img { height: 96px; width: 96px; object-fit: cover; }

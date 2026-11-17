@@ -28,14 +28,24 @@ Dzięki temu zużycie jest rozłożone na dwie platformy, a Claude nie traci tok
    - nazwa: `GEMINI_API_KEY`, wartość: skopiowany klucz → **Deploy**.
 3. (Opcjonalnie) zmienne zwykłe `GEMINI_MODEL` i `GEMINI_FALLBACK_MODEL`, jeśli chcesz podmienić modele. Domyślnie: `gemini-3.5-flash` (główny) i `gemini-3.5-flash-lite` (zapasowy, gdy główny wyczerpie limit lub jest niedostępny). Jeśli Google wycofa model, wpisz tu nazwę aktualnego z AI Studio, bez zmiany kodu.
 
-## Gdy Gemini często jest niedostępny: zapasowy dostawca (Claude) i płatny klucz Gemini
+## Gdy Gemini często jest niedostępny: darmowi dostawcy zapasowi (GPT i Llama) oraz Claude
 
-Rozpoznawanie posiłków wywołuje model Gemini. Darmowy klucz z AI Studio ma niski limit i najniższy priorytet, więc w godzinach szczytu odpowiedzi „503 / przeciążony” i „429 / limit” zdarzają się często. Są dwa sposoby, które można połączyć:
+Rozpoznawanie posiłków wywołuje model Gemini. Darmowy klucz z AI Studio ma niski priorytet i niskie limity, więc w godzinach szczytu odpowiedzi „503 / przeciążony” i „429 / limit” zdarzają się często. Serwer potrafi przejść na kolejnego dostawcę, gdy poprzedni zawiedzie. Każdy włącza się **samym sekretem** w Cloudflare (Workers & Pages → serwer → Settings → Variables and Secrets → Add → Secret → Deploy). Klucze wklejaj tylko tam, nigdy do czatu.
 
-1. **Zapasowy dostawca Claude (zalecane).** Gdy Gemini nie odpowiada, serwer od razu pyta Claude, bez czekania na kolejne próby. Potrzebny jest klucz API z console.anthropic.com (to osobne rozliczenie od subskrypcji Claude: zakładka API Keys → Create Key, potem doładowanie konta, np. 5 USD wystarczy na setki posiłków). W Cloudflare → Workers & Pages → serwer → Settings → Variables and Secrets dodaj **Secret** `ANTHROPIC_API_KEY` i kliknij Deploy. Opcjonalnie zwykłe zmienne: `CLAUDE_FOOD_MODEL` (domyślnie `claude-sonnet-5-5`; tańszy i szybszy jest `claude-haiku-5-5`) oraz `FOOD_PRIMARY=claude`, jeśli Claude ma być pierwszy (Gemini zostaje zapasowym).
-2. **Płatny poziom Gemini.** Subskrypcja Google AI Pro (aplikacja Gemini) nie daje limitów API: klucz API rozlicza się osobno. W AI Studio (aistudio.google.com) przy projekcie klucza włącz rozliczenia (Set up billing): płacisz za zużycie (przy posiłkach to grosze miesięcznie), a limity są wyraźnie wyższe. Model z rodziny Pro wpiszesz w zmiennej `GEMINI_MODEL`, jeśli chcesz dokładniejszych wyników kosztem czasu.
+Domyślna kolejność: **Gemini → GitHub Models (GPT) → Groq (Llama) → OpenAI → Claude → drugi model Gemini.** Pominięci są ci, dla których nie ma klucza.
 
-Zdjęcia w formacie HEIC obsługuje tylko Gemini (Claude ich nie przyjmuje), reszta formatów działa u obu.
+| Dostawca | Koszt | Sekret | Jak zdobyć klucz |
+| --- | --- | --- | --- |
+| **GitHub Models** (GPT-4.1) | darmowy, z dziennym limitem zapytań (dla prototypów) | `GITHUB_MODELS_TOKEN` | github.com/settings/personal-access-tokens → Generate new token → uprawnienie konta **Models: Read-only** |
+| **Groq** (Llama 4 Scout, rozumie zdjęcia) | darmowy poziom z limitami | `GROQ_API_KEY` | console.groq.com → API Keys → Create |
+| OpenAI (gpt-4.1-mini) | płatny, grosze za posiłek; subskrypcja ChatGPT nie daje API | `OPENAI_API_KEY` | platform.openai.com → API keys + doładowanie |
+| Claude | płatny, grosze za posiłek; subskrypcja Claude nie daje API | `ANTHROPIC_API_KEY` | console.anthropic.com → API Keys + doładowanie |
+
+Zalecany start bez kosztów: **GitHub Models + Groq**. Limity darmowych poziomów mogą się zmieniać, a dostawcy dostają zdjęcie posiłku tak samo jak Gemini. Kolejność zmienisz zmienną `FOOD_PROVIDERS`, np. `gemini,groq,github` (lub `claude,gemini`), a modele zmiennymi `GITHUB_MODELS_MODEL`, `GROQ_MODEL`, `OPENAI_MODEL`, `CLAUDE_FOOD_MODEL`, `GEMINI_MODEL`.
+
+**Subskrypcje a API.** Google AI Pro, ChatGPT Plus/Pro i Claude Pro/Max nie dają limitów API: to osobne rozliczenia. Jeśli kiedyś zechcesz płacić za pewność, najprościej włączyć rozliczenia dla klucza Gemini w AI Studio (limity i priorytet rosną, koszt to grosze miesięcznie).
+
+**Zdjęcia HEIC.** Aplikacja przed wysłaniem zamienia zdjęcie na JPEG (przeglądarka je dekoduje). Jeśli przeglądarka nie rozumie HEIC, wysyła oryginał, a ten przyjmuje tylko Gemini: gdy Gemini akurat nie odpowiada, dostaniesz komunikat z podpowiedzią (zdjęcie w JPEG, z galerii albo sam opis). Najprościej ustawić aparat na JPEG (ustawienia aparatu → format zdjęć / „HEIF” wyłączone). Zdjęcia wysyłane przez Telegram są zawsze JPEG.
 
 ## Krok 3. Odśwież webhook i sprawdź Gemini (1 minuta)
 

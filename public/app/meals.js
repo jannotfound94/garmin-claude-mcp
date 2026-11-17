@@ -68,9 +68,11 @@ export async function postWithRetry(path, body, setStatus) {
 
 const statusRow = (m, spin = true) => h("div", { class: "status" }, spin ? h("div", { class: "spinner" }) : null, m);
 
+const MAX_PHOTOS = 4;
+
 export function openAddMeal({ date = todayLocal(), onSaved } = {}) {
   openSheet((close) => {
-    let image = null;
+    let images = []; // do 4 zdjęć jednego posiłku (talerz, opakowanie, etykieta...)
     let kind = null; // rodzaj posiłku; brak = serwer rozpozna z opisu i godziny
     const kinds = h("div", { class: "kinds", role: "group", "aria-label": "Rodzaj posiłku" }, MEAL_KINDS.map((k) => {
       const b = h("button", { type: "button", class: "kind", "aria-pressed": "false" }, icon(k.icon, 22), h("span", {}, k.label));
@@ -89,29 +91,44 @@ export function openAddMeal({ date = todayLocal(), onSaved } = {}) {
     const preview = h("div", {});
     const status = h("div", {});
     const submit = h("button", { class: "btn block" }, "Dodaj posiłek");
+    const addPhoto = h("button", { class: "btn ghost small", onclick: () => pick(true) }, icon("camera", 16), "Zdjęcie");
+    const drawPreview = () => {
+      preview.replaceChildren(
+        ...(images.length
+          ? [h("div", { class: "previews" }, images.map((im, i) => h("div", { class: "preview" }, h("img", { src: im.url, alt: `Zdjęcie posiłku ${i + 1}` }), h("button", { class: "icon-btn", "aria-label": `Usuń zdjęcie ${i + 1}`, onclick: () => { images.splice(i, 1); drawPreview(); } }, icon("close", 16)))))]
+          : []),
+      );
+      addPhoto.textContent = "";
+      addPhoto.append(icon("camera", 16), images.length ? `Zdjęcie (${images.length}/${MAX_PHOTOS})` : "Zdjęcie");
+    };
     const pick = (capture) => {
-      const inp = h("input", { type: "file", accept: "image/*", ...(capture ? { capture: "environment" } : {}), style: { display: "none" } });
+      if (images.length >= MAX_PHOTOS) return toast(`Najwyżej ${MAX_PHOTOS} zdjęcia do jednego posiłku.`, "error");
+      const inp = h("input", { type: "file", accept: "image/*", ...(capture ? { capture: "environment" } : { multiple: true }), style: { display: "none" } });
       inp.addEventListener("change", async () => {
-        const f = inp.files && inp.files[0];
-        if (!f) return;
-        try {
-          image = await fileToJpeg(f);
-          preview.replaceChildren(h("div", { class: "preview" }, h("img", { src: image.url, alt: "Zdjęcie posiłku" }), h("button", { class: "icon-btn", "aria-label": "Usuń zdjęcie", onclick: () => ((image = null), preview.replaceChildren()) }, icon("close", 16))));
-        } catch (e) {
-          toast(e.message, "error");
+        const files = [...(inp.files || [])];
+        if (!files.length) return;
+        const room = MAX_PHOTOS - images.length;
+        if (files.length > room) toast(`Dodałem ${room} z ${files.length}: najwyżej ${MAX_PHOTOS} zdjęcia do jednego posiłku.`, "info", 5000);
+        for (const f of files.slice(0, room)) {
+          try {
+            images.push(await fileToJpeg(f));
+          } catch (e) {
+            toast(e.message, "error");
+          }
         }
+        drawPreview();
       });
       document.body.append(inp);
       inp.click();
       setTimeout(() => inp.remove(), 60000);
     };
     submit.addEventListener("click", async () => {
-      if (!text.value.trim() && !image) return toast("Napisz, co zjadłeś, albo dodaj zdjęcie.", "error");
+      if (!text.value.trim() && !images.length) return toast("Napisz, co zjadłeś, albo dodaj zdjęcie.", "error");
       submit.disabled = true;
       const setStatus = (m) => status.replaceChildren(statusRow(m));
-      setStatus(image ? "Analizuję zdjęcie…" : "Liczę kalorie…");
+      setStatus(images.length > 1 ? `Analizuję zdjęcia (${images.length})…` : images.length ? "Analizuję zdjęcie…" : "Liczę kalorie…");
       try {
-        const body = { text: text.value.trim(), ...(image ? { image: { mime: image.mime, data: image.data } } : {}), ...(date !== todayLocal() ? { date } : {}), ...(kind ? { kind } : {}), time: time.value };
+        const body = { text: text.value.trim(), ...(images.length ? { images: images.map((im) => ({ mime: im.mime, data: im.data })) } : {}), ...(date !== todayLocal() ? { date } : {}), ...(kind ? { kind } : {}), time: time.value };
         const r = await postWithRetry("/meals", body, setStatus);
         invalidateSummary();
         toast(`Zapisano: ${r.meal.label} (${n0(r.meal.totals.kcal)} kcal)`);
@@ -131,8 +148,8 @@ export function openAddMeal({ date = todayLocal(), onSaved } = {}) {
       h("div", { class: "small muted", style: { marginTop: "-6px" } }, "Rodzaj posiłku (bez wyboru rozpoznam go sam z godziny i opisu)"),
       text,
       preview,
-      h("div", { class: "row wrap" }, h("button", { class: "btn ghost small", onclick: () => pick(true) }, icon("camera", 16), "Zdjęcie"), h("button", { class: "btn ghost small", onclick: () => pick(false) }, icon("image", 16), "Galeria"), h("div", { class: "grow" }), h("label", { class: "field", style: { width: "112px" } }, "Godzina", time)),
-      h("div", { class: "small muted" }, "Możesz dodać samo zdjęcie, sam opis albo oba. Opis ma pierwszeństwo (np. „połowa porcji”, „150 g”)."),
+      h("div", { class: "row wrap" }, addPhoto, h("button", { class: "btn ghost small", onclick: () => pick(false) }, icon("image", 16), "Galeria"), h("div", { class: "grow" }), h("label", { class: "field", style: { width: "112px" } }, "Godzina", time)),
+      h("div", { class: "small muted" }, "Możesz dodać samo zdjęcie, sam opis albo oba, a zdjęć do jednego posiłku nawet kilka (np. talerz i opakowanie fety). Opis ma pierwszeństwo (np. „połowa porcji”, „150 g”)."),
       status,
       submit,
     );
