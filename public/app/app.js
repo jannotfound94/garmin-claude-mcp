@@ -82,9 +82,10 @@ if ("serviceWorker" in navigator) {
     const m = ev.data || {};
     if (m.type === "push") toast(`${m.title}: ${m.body}`.slice(0, 160), "info", 7000);
     if (m.type === "navigate") {
+      // Zastępujemy bieżący wpis historii zamiast dodawać nowy: wpis dodany bez dotknięcia ekranu psuje przycisk "wstecz".
       const hash = new URL(m.url).hash;
-      if (hash) location.hash = hash;
-      else render();
+      if (hash && hash !== location.hash) history.replaceState(null, "", hash);
+      render();
     }
   });
 }

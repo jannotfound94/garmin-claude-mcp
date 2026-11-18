@@ -5,6 +5,16 @@ import { areaChart } from "./charts.js";
 import { header } from "./view-today.js";
 import { WD, addDays, card, chip, dateObj, errMsg, h, icon, iconButton, loading, n0, n1, pace, pills, rerender, toast, todayLocal, weatherChips } from "./ui.js";
 
+// Starsza wersja aplikacji na Androida (APK) nie umiała otworzyć pliku GPX i przycisk nic nie robił. Nowa ustawia
+// window.gardaNative; w starej (WebView bez znacznika) zamiast ciszy mówimy, co zrobić.
+const OLD_APK_GPX = "Ta wersja aplikacji nie otwiera plików GPX. Zainstaluj najnowszą wersję aplikacji (GitHub → Releases) albo otwórz Garda w przeglądarce Chrome.";
+function gpxClick(ev) {
+  if (/; wv\)/.test(navigator.userAgent) && !window.gardaNative) {
+    ev.preventDefault();
+    toast(OLD_APK_GPX, "error", 9000);
+  }
+}
+
 export async function viewPlan(root) {
   root.append(header("Plan", ""), loading("Pobieram plan z intervals.icu…"));
   let d;
@@ -89,7 +99,7 @@ function planCard(p, weatherDay) {
           routes.replaceChildren(
             ...(r.note ? [h("div", { class: "small muted" }, r.note)] : []),
             ...r.options.map((o) =>
-              h("div", { class: "route" }, h("div", { class: "row between" }, h("strong", {}, `Trasa ${o.label} · ${n1(o.km)} km`), chip(o.kind === "park" ? "przez parki" : "pętla ORS", o.kind === "park" ? "good" : "")), h("div", { class: "small muted" }, `nieutwardzona ${n0(o.unpavedPct)}% · zieleń ${n1(o.greenAvg)}/10 · dwa razy tą samą drogą ${n0(o.retracePct)}%${o.via ? ` · przez ${o.via.join(", ")}` : ""}`), h("div", { class: "links" }, h("a", { href: o.mapUrl }, "Mapa"), h("a", { href: o.gpxUrl }, "Otwórz GPX w aplikacji"))),
+              h("div", { class: "route" }, h("div", { class: "row between" }, h("strong", {}, `Trasa ${o.label} · ${n1(o.km)} km`), chip(o.kind === "park" ? "przez parki" : "pętla ORS", o.kind === "park" ? "good" : "")), h("div", { class: "small muted" }, `nieutwardzona ${n0(o.unpavedPct)}% · zieleń ${n1(o.greenAvg)}/10 · dwa razy tą samą drogą ${n0(o.retracePct)}%${o.via ? ` · przez ${o.via.join(", ")}` : ""}`), h("div", { class: "links" }, h("a", { href: o.mapUrl }, "Mapa"), h("a", { href: o.gpxUrl, onclick: gpxClick }, "Otwórz GPX w aplikacji"))),
             ),
           );
         } catch (e) {
@@ -128,7 +138,7 @@ function textRouteCard() {
         ...(r.warnings || []).map((w) => h("div", { class: "small warn" }, `⚠️ ${w}`)),
         h("div", { class: "route" }, h("strong", {}, "Rozpoznane punkty"), h("ol", { class: "pts" }, r.points.map((p) => h("li", {}, h("span", {}, p.name), h("span", { class: "small muted" }, ` · ${KIND_PL[p.kind] || p.kind}${p.found && p.found !== p.name ? ` → ${p.found}` : ""}${p.confidence === "low" ? " (niepewnie)" : ""}`)))), h("div", { class: "small muted" }, "Jeśli coś jest źle, doprecyzuj w opisie (dzielnica, ulica, pełna nazwa) i wyznacz jeszcze raz.")),
         ...r.options.map((o) =>
-          h("div", { class: "route" }, h("div", { class: "row between" }, h("strong", {}, `Trasa ${o.label} · ${n1(o.km)} km`), chip("wg opisu", "good")), h("div", { class: "small muted" }, `nieutwardzona ${n0(o.unpavedPct)}% · zieleń ${n1(o.greenAvg)}/10 · dwa razy tą samą drogą ${n0(o.retracePct)}%`), h("div", { class: "links" }, h("a", { href: o.mapUrl }, "Mapa"), h("a", { href: o.gpxUrl }, "Otwórz GPX w aplikacji"))),
+          h("div", { class: "route" }, h("div", { class: "row between" }, h("strong", {}, `Trasa ${o.label} · ${n1(o.km)} km`), chip("wg opisu", "good")), h("div", { class: "small muted" }, `nieutwardzona ${n0(o.unpavedPct)}% · zieleń ${n1(o.greenAvg)}/10 · dwa razy tą samą drogą ${n0(o.retracePct)}%`), h("div", { class: "links" }, h("a", { href: o.mapUrl }, "Mapa"), h("a", { href: o.gpxUrl, onclick: gpxClick }, "Otwórz GPX w aplikacji"))),
         ),
       );
     } catch (e) {
