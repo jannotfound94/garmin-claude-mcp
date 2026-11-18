@@ -19,7 +19,8 @@ import java.net.URL;
 
 /**
  * Domyślny BridgeActivity zamyka aplikację przy każdym przycisku "wstecz" (bez wtyczki @capacitor/app nie cofa historii).
- * Tutaj "wstecz" cofa historię WebView (mapa trasy → plan), a dopiero na ekranie startowym chowa aplikację.
+ * Tutaj "wstecz" najpierw zamyka otwarte okno aplikacji, potem cofa historię WebView (mapa trasy → plan), a dopiero na
+ * pierwszym ekranie chowa aplikację.
  * Plik GPX z trasy nie jest "pobierany" do katalogu Pobrane: trafia do pamięci podręcznej i od razu otwiera się
  * systemowa lista aplikacji (Garmin Connect, Locus, OsmAnd...), z której Jan wybiera, gdzie go otworzyć.
  */
@@ -34,11 +35,23 @@ public class MainActivity extends BridgeActivity {
               @Override
               public void handleOnBackPressed() {
                 WebView wv = bridge != null ? bridge.getWebView() : null;
-                if (wv != null && wv.canGoBack()) {
-                  wv.goBack();
-                } else {
+                if (wv == null) {
                   moveTaskToBack(true);
+                  return;
                 }
+                // Najpierw strona: otwarte okno (np. dodawanie posiłku) zamyka sama aplikacja (window.gardaBack).
+                wv.evaluateJavascript(
+                    "(function(){try{return !!(window.gardaBack&&window.gardaBack());}catch(e){return false;}})()",
+                    handled -> {
+                      if ("true".equals(handled)) return;
+                      // Cofamy przez history.back(), nie wv.goBack(): WebView pomija w goBack() wpisy historii dodane bez
+                      // dotknięcia ekranu i wtedy "wstecz" przeskakiwał ekran albo zamykał aplikację.
+                      if (wv.copyBackForwardList().getCurrentIndex() > 0) {
+                        wv.evaluateJavascript("history.back()", null);
+                      } else {
+                        moveTaskToBack(true);
+                      }
+                    });
               }
             });
     final WebView wv = bridge != null ? bridge.getWebView() : null;
@@ -56,6 +69,13 @@ public class MainActivity extends BridgeActivity {
                 return true;
               }
               return super.shouldOverrideUrlLoading(view, request);
+            }
+
+            @Override
+            public void onPageFinished(WebView view, String url) {
+              super.onPageFinished(view, url);
+              // Znacznik dla strony: ta wersja aplikacji sama otwiera pliki GPX (starsza nie umiała i strona prosi o aktualizację).
+              view.evaluateJavascript("window.gardaNative=2", null);
             }
           });
     }

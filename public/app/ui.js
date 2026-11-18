@@ -94,14 +94,28 @@ function ensurePopListener() {
       if (!ignorePops) flushDeferred();
       return;
     }
-    const top = sheetStack[sheetStack.length - 1];
-    // Wpis okna zniknął z historii (użytkownik cofnął): zamykamy okno bez ponownego cofania.
-    if (top && !(history.state && history.state.sheetId === top.id)) {
+    // Wpisy okien zniknęły z historii (użytkownik cofnął): zamykamy te okna bez ponownego cofania. Okna bez własnego wpisu
+    // (otwarte bez dotknięcia, patrz openSheet) zamykamy razem z nimi, żeby nie zostały nad innym ekranem.
+    const cur = history.state && history.state.sheetId;
+    while (sheetStack.length) {
+      const top = sheetStack[sheetStack.length - 1];
+      if (top.hasEntry && top.id === cur) break;
       sheetStack.pop();
       top.bg.remove();
     }
   });
 }
+
+/**
+ * Przycisk "wstecz" w aplikacji na Androida (MainActivity) pyta najpierw stronę: jeśli jest otwarte okno, zamykamy je
+ * i zwracamy true; w przeciwnym razie false i telefon cofa się o ekran.
+ */
+window.gardaBack = () => {
+  const top = sheetStack[sheetStack.length - 1];
+  if (!top) return false;
+  top.close();
+  return true;
+};
 function flushDeferred() {
   const fns = deferred;
   deferred = [];
@@ -137,12 +151,20 @@ export function openSheet(build) {
       history.back();
     }
   };
-  try {
-    history.pushState({ sheetId: id }, "");
-  } catch {
-    /* brak historii (np. tryb osadzony): okno działa bez obsługi "wstecz" */
+  // Wpis historii dodajemy tylko po dotknięciu (np. przycisku "+"). Przeglądarka traktuje wpisy dodane bez dotknięcia
+  // (np. okno otwarte z powiadomienia albo pytanie o post po zapisaniu posiłku, gdy analiza zdjęcia trwała kilka sekund)
+  // jako podejrzane i przycisk "wstecz" przeskakuje wtedy poprzedni ekran: tak "wstecz" po dodaniu posiłku lądował
+  // na złym ekranie albo wychodził z aplikacji. Takie okno zamyka "wstecz" w aplikacji (gardaBack) albo przycisk.
+  const ua = navigator.userActivation;
+  let hasEntry = !ua || ua.isActive;
+  if (hasEntry) {
+    try {
+      history.pushState({ sheetId: id }, "");
+    } catch {
+      hasEntry = false; /* brak historii (np. tryb osadzony): okno działa bez obsługi "wstecz" */
+    }
   }
-  sheetStack.push({ id, bg });
+  sheetStack.push({ id, bg, hasEntry, close });
   append(sheet, [build(close)]);
   bg.append(sheet);
   document.body.append(bg);
